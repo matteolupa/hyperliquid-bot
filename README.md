@@ -1,0 +1,2 @@
+# hyperliquid-bot
+Hyperliquid bot

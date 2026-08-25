@@ -1,0 +1,15 @@
+{
+  "total_realized_profit_usd": 0.0,
+  "total_completed_trades": 0,
+  "active_trade": {
+    "symbol": "ETH",
+    "size": 0.0167,
+    "entry_price": 3000.0,
+    "entry_time": 1787651340.0536761,
+    "breakeven_price": 3001.350135,
+    "take_profit_price": 3031.36,
+    "stop_loss_price": 2940.0,
+    "entry_fee_usd": 0.017535,
+    "target_net_profit_usd": 0.5061770000000021
+  }
+}

@@ -6,7 +6,7 @@ import os
 import signal
 import sys
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from .client import HyperliquidClient
 from .config import HyperliquidConfig

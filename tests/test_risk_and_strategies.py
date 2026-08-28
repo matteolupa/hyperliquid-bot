@@ -139,6 +139,40 @@ class TestRiskAndStrategies(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_auto_compounding_allocation(self):
+        from hyperliquid_bot.strategies.funding_harvester import FundingHarvesterStrategy
+
+        class DummyClient:
+            pass
+
+        strategy = FundingHarvesterStrategy(
+            client=DummyClient(),
+            allocation_per_position_usd=200.0,
+            max_positions=2,
+            auto_compound=True,
+            dry_run=True,
+        )
+        self.assertEqual(strategy.current_allocation_usd, 200.0)
+
+        # Simulate earned funding
+        strategy.total_funding_earned_usd = 50.0
+        # 50.0 / 2 positions = 25.0 extra per position -> 225.0
+        self.assertEqual(strategy.current_allocation_usd, 225.0)
+
+    def test_telegram_daily_summary_method(self):
+        from hyperliquid_bot.telegram import TelegramNotifier
+        notifier = TelegramNotifier(bot_token=None, chat_id=None)
+        # Should gracefully return None when disabled
+        notifier.send_daily_summary(
+            date_str="2026-08-28",
+            daily_earnings_usd=10.50,
+            total_lifetime_earnings_usd=50.25,
+            capital_allocated_usd=500.0,
+            daily_roi_pct=2.10,
+            compounded_boost_usd=50.25,
+            positions_summary="• APEX: APY 150%",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

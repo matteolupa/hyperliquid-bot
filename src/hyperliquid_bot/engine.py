@@ -97,6 +97,11 @@ class BotEngine:
             return
 
         last_status_time = time.time()
+        self.current_day_str = time.strftime("%Y-%m-%d")
+        initial_status = self.strategy.get_status()
+        self.day_start_earnings_usd = initial_status.get(
+            "total_lifetime_earnings_usd", initial_status.get("total_funding_earned_usd", 0.0)
+        )
 
         while self.is_running:
             loop_start = time.time()
@@ -114,6 +119,45 @@ class BotEngine:
                     else:
                         self.logger.info(f"📋 [STATUS REPORT] {status}")
                     last_status_time = time.time()
+
+                # Check for Midnight Day Transition for Daily Telegram Summary
+                today_str = time.strftime("%Y-%m-%d")
+                if today_str != self.current_day_str:
+                    status = self.strategy.get_status()
+                    current_lifetime = status.get(
+                        "total_lifetime_earnings_usd", status.get("total_funding_earned_usd", 0.0)
+                    )
+                    daily_earnings = current_lifetime - self.day_start_earnings_usd
+                    capital = status.get("capital_allocated_usd", 0.0)
+                    daily_roi = (daily_earnings / capital * 100.0) if capital > 0 else 0.0
+                    compounded_boost = status.get("compounded_boost_usd", 0.0)
+
+                    # Build positions summary
+                    active_pos = status.get("active_positions", {})
+                    pos_lines = []
+                    for coin, p_info in active_pos.items():
+                        pos_lines.append(f"  • {coin}: APY {p_info.get('apy', 0.0)}% | PnL +${p_info.get('estimated_funding_usd', 0.0):.4f}")
+                    pos_summary_str = "\n".join(pos_lines) if pos_lines else "Nessuna posizione attiva."
+
+                    self.logger.info(
+                        f"🌙 [REPORT GIORNALIERO {self.current_day_str}] Guadagno 24h: +${daily_earnings:.4f} USD | "
+                        f"ROI: +{daily_roi:.2f}% | Capitale: ${capital:,.2f}"
+                    )
+
+                    if self.telegram:
+                        self.telegram.send_daily_summary(
+                            date_str=self.current_day_str,
+                            daily_earnings_usd=daily_earnings,
+                            total_lifetime_earnings_usd=current_lifetime,
+                            capital_allocated_usd=capital,
+                            daily_roi_pct=daily_roi,
+                            compounded_boost_usd=compounded_boost,
+                            positions_summary=pos_summary_str,
+                        )
+
+                    # Reset day tracker for the new day
+                    self.current_day_str = today_str
+                    self.day_start_earnings_usd = current_lifetime
 
             except KeyboardInterrupt:
                 self.logger.info("Interruzione da tastiera.")

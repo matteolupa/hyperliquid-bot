@@ -53,6 +53,7 @@ class FundingHarvesterStrategy(BaseStrategy):
         min_exit_apy_pct: float = 3.0,  # Exit if funding falls below 3% APY
         max_positions: int = 3,  # Max active markets
         allocation_per_position_usd: float = 2_000.0,
+        auto_compound: bool = True,
     ):
         super().__init__(
             client=client,
@@ -64,12 +65,27 @@ class FundingHarvesterStrategy(BaseStrategy):
         self.min_entry_apy_pct = min_entry_apy_pct
         self.min_exit_apy_pct = min_exit_apy_pct
         self.max_positions = max_positions
+        self.base_allocation_usd = allocation_per_position_usd
         self.allocation_per_position_usd = allocation_per_position_usd
+        self.auto_compound = auto_compound
         self.active_positions: Dict[str, ActiveFundingPosition] = {}
         self.total_funding_earned_usd: float = 0.0
         self.persistence = StatePersistenceManager(
             filename=f"funding_state_{'dry' if self.dry_run else 'live'}.json"
         )
+
+    @property
+    def current_allocation_usd(self) -> float:
+        """Calculate allocation per position dynamically including auto-compounded profits."""
+        if not self.auto_compound:
+            return self.base_allocation_usd
+        total_lifetime = self.total_funding_earned_usd + sum(
+            p.accumulated_funding_usd for p in self.active_positions.values()
+        )
+        if total_lifetime > 0:
+            extra_per_position = total_lifetime / max(self.max_positions, 1)
+            return round(self.base_allocation_usd + extra_per_position, 2)
+        return self.base_allocation_usd
 
     def _save_state(self) -> None:
         """Persist current positions and earnings to disk."""
@@ -224,7 +240,7 @@ class FundingHarvesterStrategy(BaseStrategy):
             if opp.mark_price <= 0:
                 continue
 
-            target_size = self.allocation_per_position_usd / opp.mark_price
+            target_size = self.current_allocation_usd / opp.mark_price
             notional = target_size * opp.mark_price
 
             # Risk check
@@ -289,6 +305,7 @@ class FundingHarvesterStrategy(BaseStrategy):
         )
         total_daily_rate = total_hourly_rate * 24.0
         total_lifetime = self.total_funding_earned_usd + total_accrued
+        compounded_extra = total_lifetime if self.auto_compound else 0.0
 
         lines = [
             "\n" + "=" * 65,
@@ -297,8 +314,10 @@ class FundingHarvesterStrategy(BaseStrategy):
             f"   Rendita Oraria Stimata:   +${total_hourly_rate:.4f}/h (+${total_daily_rate:.2f}/giorno)",
             f"   Funding Maturato Attuale: +${total_accrued:.4f} USD",
             f"   Totale Guadagni Incassati:+${total_lifetime:.4f} USD",
-            "-" * 65,
         ]
+        if self.auto_compound and compounded_extra > 0:
+            lines.append(f"   ⚡ Auto-Compounding:      +${compounded_extra:.4f} reinvestiti (Taglia/Pos: ${self.current_allocation_usd:.2f})")
+        lines.append("-" * 65)
 
         for coin, p in self.active_positions.items():
             hours = (time.time() - p.entry_time) / 3600.0
@@ -312,18 +331,25 @@ class FundingHarvesterStrategy(BaseStrategy):
         return "\n".join(lines)
 
     def get_status(self) -> Dict[str, Any]:
+        total_allocated = sum(p.size * p.entry_price for p in self.active_positions.values())
+        total_accrued = sum(p.accumulated_funding_usd for p in self.active_positions.values())
+        total_lifetime = self.total_funding_earned_usd + total_accrued
         return {
             "strategy": self.name,
             "dry_run": self.dry_run,
             "active_positions_count": len(self.active_positions),
-            "formatted_report": self.format_status_report(),
+            "capital_allocated_usd": round(total_allocated, 2),
+            "total_lifetime_earnings_usd": round(total_lifetime, 4),
+            "compounded_boost_usd": round(total_lifetime if self.auto_compound else 0.0, 4),
             "active_positions": {
                 coin: {
                     "size": p.size,
                     "entry_price": p.entry_price,
                     "estimated_funding_usd": round(p.accumulated_funding_usd, 4),
+                    "apy": round(self.calculate_apy(p.hourly_rate_at_entry), 2),
                 }
                 for coin, p in self.active_positions.items()
             },
             "total_funding_earned_usd": round(self.total_funding_earned_usd, 4),
+            "formatted_report": self.format_status_report(),
         }

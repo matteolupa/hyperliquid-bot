@@ -109,12 +109,19 @@ class AdaptiveMarketMakerStrategy(BaseStrategy):
         mid_price: float,
         inventory_units: float,
     ) -> MarketMakingQuotes:
-        """Calculate optimal Bid and Ask prices ensuring fee profitability."""
+        """Calculate optimal Bid and Ask prices ensuring fee profitability and cost-basis protection."""
         res_price = self.calculate_reservation_price(mid_price, inventory_units)
         half_spread_pct = (self.base_spread_bps / 2.0) / 10_000.0
 
         bid_price = round(res_price * (1.0 - half_spread_pct), 4)
-        ask_price = round(res_price * (1.0 + half_spread_pct), 4)
+        raw_ask_price = round(res_price * (1.0 + half_spread_pct), 4)
+
+        # COST-BASIS PROTECTION: If we hold inventory, NEVER quote ASK below entry price + fees!
+        if inventory_units > 0 and self.avg_entry_price > 0:
+            min_profitable_ask = round(self.avg_entry_price * (1.0 + half_spread_pct), 4)
+            ask_price = max(raw_ask_price, min_profitable_ask)
+        else:
+            ask_price = raw_ask_price
 
         order_size = round(self.order_size_usd / mid_price, 4) if mid_price > 0 else 0.0
         spread_bps = round(((ask_price - bid_price) / mid_price) * 10_000.0, 2) if mid_price > 0 else 0.0

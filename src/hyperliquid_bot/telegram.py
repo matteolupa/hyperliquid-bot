@@ -101,6 +101,36 @@ class TelegramNotifier:
 
         self.send_message(msg)
 
+    def send_daily_summary(
+        self,
+        date_str: str,
+        daily_earnings_usd: float,
+        total_lifetime_earnings_usd: float,
+        capital_allocated_usd: float,
+        daily_roi_pct: float,
+        compounded_boost_usd: float = 0.0,
+        positions_summary: str = "",
+    ) -> None:
+        """Send elegant daily midnight earnings report."""
+        msg = (
+            f"🌙 <b>REPORT GIORNALIERO BOT ({date_str})</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"💰 <b>Guadagno 24h:</b> 🟢 <b>+${daily_earnings_usd:.4f} USD</b>\n"
+            f"📈 <b>ROI Giornaliero:</b> <b>+{daily_roi_pct:.2f}%</b>\n"
+            f"🏦 <b>Capitale Allocato:</b> ${capital_allocated_usd:,.2f}\n"
+        )
+        if compounded_boost_usd > 0:
+            msg += f"⚡ <b>Auto-Compounding Attivo:</b> +${compounded_boost_usd:.2f} reinvestiti\n"
+        msg += (
+            f"🏆 <b>Totale Storico Incassato:</b> <b>+${total_lifetime_earnings_usd:.4f} USD</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+        )
+        if positions_summary:
+            msg += f"<b>Posizioni Attive:</b>\n{positions_summary}\n"
+        msg += f"<i>Il bot continua a macinare rendita 24/7. Buonanotte!</i> 😴"
+
+        self.send_message(msg)
+
     def send_shutdown(self, strategy_name: str, summary: str = "") -> None:
         """Send bot shutdown alert."""
         msg = (

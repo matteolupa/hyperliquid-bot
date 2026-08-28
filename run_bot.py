@@ -85,6 +85,12 @@ def parse_args():
         help="Minimum annualized funding APY %% required to enter a position (Funding strategy)",
     )
     parser.add_argument(
+        "--auto-compound",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Reinvest funding profits automatically into position sizes (Auto-Compounding)",
+    )
+    parser.add_argument(
         "--spread-bps",
         type=float,
         default=8.0,
@@ -152,6 +158,7 @@ def main():
                 telegram=telegram,
                 min_entry_apy_pct=args.min_apy,
                 allocation_per_position_usd=args.order_size_usd,
+                auto_compound=args.auto_compound,
             )
         elif args.strategy == "market_maker":
             interval = args.interval if args.interval is not None else 10.0

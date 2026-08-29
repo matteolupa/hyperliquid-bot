@@ -91,16 +91,28 @@ def parse_args():
         help="Reinvest funding profits automatically into position sizes (Auto-Compounding)",
     )
     parser.add_argument(
+        "--min-oi-usd",
+        type=float,
+        default=50_000.0,
+        help="Minimum Open Interest in USD to prevent entering illiquid markets (default: $50,000)",
+    )
+    parser.add_argument(
+        "--persistence-checks",
+        type=int,
+        default=2,
+        help="Number of consecutive scans a token must maintain high APY before entering (default: 2)",
+    )
+    parser.add_argument(
         "--spread-bps",
         type=float,
         default=8.0,
-        help="Base Bid/Ask spread in basis points for Market Maker (1 bps = 0.01%%)",
+        help="Base Bid/Ask spread in basis points for Market Maker (1 bps = 0.01%)",
     )
     parser.add_argument(
         "--max-drawdown-pct",
         type=float,
         default=5.0,
-        help="Emergency Circuit Breaker max drawdown percentage (e.g. 5.0 for 5%%)",
+        help="Emergency Circuit Breaker max drawdown percentage (e.g. 5.0 for 5%)",
     )
 
     return parser.parse_args()
@@ -159,6 +171,8 @@ def main():
                 min_entry_apy_pct=args.min_apy,
                 allocation_per_position_usd=args.order_size_usd,
                 auto_compound=args.auto_compound,
+                min_open_interest_usd=args.min_oi_usd,
+                persistence_checks_required=args.persistence_checks,
             )
         elif args.strategy == "market_maker":
             interval = args.interval if args.interval is not None else 10.0

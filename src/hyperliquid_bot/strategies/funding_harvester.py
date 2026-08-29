@@ -54,6 +54,8 @@ class FundingHarvesterStrategy(BaseStrategy):
         max_positions: int = 3,  # Max active markets
         allocation_per_position_usd: float = 2_000.0,
         auto_compound: bool = True,
+        min_open_interest_usd: float = 50_000.0,  # Minimum Open Interest in USD to prevent illiquid slippage
+        persistence_checks_required: int = 2,  # Number of consecutive ticks candidate must hold high APY
     ):
         super().__init__(
             client=client,
@@ -68,6 +70,9 @@ class FundingHarvesterStrategy(BaseStrategy):
         self.base_allocation_usd = allocation_per_position_usd
         self.allocation_per_position_usd = allocation_per_position_usd
         self.auto_compound = auto_compound
+        self.min_open_interest_usd = min_open_interest_usd
+        self.persistence_checks_required = max(1, persistence_checks_required)
+        self.candidate_seen_count: Dict[str, int] = {}
         self.active_positions: Dict[str, ActiveFundingPosition] = {}
         self.total_funding_earned_usd: float = 0.0
         self.persistence = StatePersistenceManager(
@@ -161,7 +166,11 @@ class FundingHarvesterStrategy(BaseStrategy):
                 open_interest = float(ctx.get("openInterest", "0")) * mark_price
                 apy = self.calculate_apy(hourly_funding)
 
-                if apy >= self.min_entry_apy_pct:
+                if apy >= min(self.min_entry_apy_pct, self.min_exit_apy_pct):
+                    # Filter by minimum open interest to prevent slippage on illiquid pairs
+                    if open_interest < self.min_open_interest_usd:
+                        continue
+
                     opportunities.append(
                         FundingOpportunity(
                             coin=coin,
@@ -184,7 +193,8 @@ class FundingHarvesterStrategy(BaseStrategy):
         mode_str = "DRY-RUN (Simulazione)" if self.dry_run else "LIVE TRADING"
         logger.info(f"🚀 [{self.name}] Avviato in modalità: {mode_str}")
         logger.info(
-            f"   Soglia Minima Ingresso: {self.min_entry_apy_pct}% APY | Uscita: {self.min_exit_apy_pct}% APY"
+            f"   Soglia Minima Ingresso: {self.min_entry_apy_pct}% APY | Uscita: {self.min_exit_apy_pct}% APY | "
+            f"Min Open Interest: ${self.min_open_interest_usd:,.0f} | Persistenza: {self.persistence_checks_required} tick"
         )
 
     def on_tick(self) -> None:
@@ -196,7 +206,8 @@ class FundingHarvesterStrategy(BaseStrategy):
             top_opp = opportunities[0]
             logger.info(
                 f"📊 Opportunità Top: {top_opp.coin} | APY: {top_opp.annualized_apy_pct}% "
-                f"(Rate: {top_opp.hourly_funding_rate * 100:.4f}%/h) | Prezzo: ${top_opp.mark_price:,.2f}"
+                f"(Rate: {top_opp.hourly_funding_rate * 100:.4f}%/h) | Prezzo: ${top_opp.mark_price:,.2f} | "
+                f"OI: ${top_opp.open_interest_usd:,.0f}"
             )
 
         # 1. Manage existing positions (check if APY decayed)
@@ -230,6 +241,12 @@ class FundingHarvesterStrategy(BaseStrategy):
                 self.total_funding_earned_usd += est_funding
                 del self.active_positions[coin]
 
+        # Clean up persistence trackers for coins that dropped below threshold
+        active_candidate_coins = {o.coin for o in opportunities if o.annualized_apy_pct >= self.min_entry_apy_pct}
+        self.candidate_seen_count = {
+            c: count for c, count in self.candidate_seen_count.items() if c in active_candidate_coins
+        }
+
         # 2. Enter new opportunities if slots available
         for opp in opportunities:
             if len(self.active_positions) >= self.max_positions:
@@ -237,7 +254,21 @@ class FundingHarvesterStrategy(BaseStrategy):
             if opp.coin in self.active_positions:
                 continue
 
+            if opp.annualized_apy_pct < self.min_entry_apy_pct:
+                continue
+
             if opp.mark_price <= 0:
+                continue
+
+            # Persistence filter: ensure high APY is sustained across consecutive checks
+            current_seen = self.candidate_seen_count.get(opp.coin, 0) + 1
+            self.candidate_seen_count[opp.coin] = current_seen
+
+            if current_seen < self.persistence_checks_required:
+                logger.info(
+                    f"⏳ [PERSISTENZA] {opp.coin} APY {opp.annualized_apy_pct}% rilevato ({current_seen}/{self.persistence_checks_required}). "
+                    f"In attesa di conferma al prossimo tick..."
+                )
                 continue
 
             target_size = self.current_allocation_usd / opp.mark_price

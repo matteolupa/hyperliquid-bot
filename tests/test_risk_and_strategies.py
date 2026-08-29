@@ -173,6 +173,54 @@ class TestRiskAndStrategies(unittest.TestCase):
             positions_summary="• APEX: APY 150%",
         )
 
+    def test_liquidity_and_persistence_filters(self):
+        import tempfile
+        import shutil
+        from hyperliquid_bot.persistence import StatePersistenceManager
+        from hyperliquid_bot.strategies.funding_harvester import FundingHarvesterStrategy
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            class MockInfo:
+                def meta_and_asset_ctxs(self):
+                    return [
+                        {"universe": [{"name": "HIGH_LIQ"}, {"name": "LOW_LIQ"}]},
+                        [
+                            {"funding": "0.0001", "markPx": "100.0", "openInterest": "2000"},  # 200k OI -> APY 87.6%
+                            {"funding": "0.0002", "markPx": "1.0", "openInterest": "5000"},    # 5k OI -> APY 175.2% (Illiquid)
+                        ],
+                    ]
+
+            class MockClient:
+                info = MockInfo()
+
+            strategy = FundingHarvesterStrategy(
+                client=MockClient(),
+                min_entry_apy_pct=10.0,
+                min_open_interest_usd=50_000.0,
+                persistence_checks_required=2,
+                dry_run=True,
+            )
+            strategy.persistence = StatePersistenceManager(data_dir=temp_dir, filename="test_funding.json")
+
+            # Scan should filter out LOW_LIQ because its OI is 5k < 50k
+            opps = strategy.scan_opportunities()
+            self.assertEqual(len(opps), 1)
+            self.assertEqual(opps[0].coin, "HIGH_LIQ")
+
+            strategy.on_start()
+
+            # Persistence check on tick 1 (should wait)
+            strategy.on_tick()
+            self.assertNotIn("HIGH_LIQ", strategy.active_positions)
+            self.assertEqual(strategy.candidate_seen_count["HIGH_LIQ"], 1)
+
+            # Persistence check on tick 2 (confirmed -> enters)
+            strategy.on_tick()
+            self.assertIn("HIGH_LIQ", strategy.active_positions)
+        finally:
+            shutil.rmtree(temp_dir)
+
 
 if __name__ == "__main__":
     unittest.main()

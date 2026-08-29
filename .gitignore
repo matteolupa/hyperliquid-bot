@@ -34,8 +34,9 @@ env/
 *.pem
 *.key
 
-# Logs & Database
+# Logs & Database & State
 logs/
+data/
 *.log
 *.db
 

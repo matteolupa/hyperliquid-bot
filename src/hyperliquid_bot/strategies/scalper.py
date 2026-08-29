@@ -176,6 +176,7 @@ class ScalperStrategy(BaseStrategy):
                         )
                     self.active_trade = None
                     self.reference_price = current_price
+                    self._save_state()
                     return
 
                 # 2. Check Stop Loss (se attivo)
@@ -203,6 +204,7 @@ class ScalperStrategy(BaseStrategy):
                         )
                     self.active_trade = None
                     self.reference_price = current_price
+                    self._save_state()
                     return
 
                 # Posizione in corso: log periodico

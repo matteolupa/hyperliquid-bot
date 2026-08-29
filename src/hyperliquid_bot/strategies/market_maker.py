@@ -160,8 +160,6 @@ class AdaptiveMarketMakerStrategy(BaseStrategy):
 
             mid_price = float(mid_price_str)
             prev_quotes = self.last_quotes
-            quotes = self.calculate_quotes(mid_price, self.inventory_units)
-            self.last_quotes = quotes
 
             # Simulation of passive limit order fills in DRY-RUN
             if self.dry_run and prev_quotes:
@@ -215,6 +213,10 @@ class AdaptiveMarketMakerStrategy(BaseStrategy):
                             pnl=net_profit,
                             notes=f"PnL Totale Accumulato: +${self.realized_pnl_usd:.4f} USD",
                         )
+
+            # Calculate and set active quotes for the next tick based on updated inventory
+            quotes = self.calculate_quotes(mid_price, self.inventory_units)
+            self.last_quotes = quotes
 
             logger.info(
                 f"📈 [{self.symbol}] Mid: ${mid_price:,.2f} | "

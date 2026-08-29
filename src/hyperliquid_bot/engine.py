@@ -109,6 +109,26 @@ class BotEngine:
                 # Execute strategy tick
                 self.strategy.on_tick()
 
+                # Check Risk Manager Equity and Drawdown Circuit Breaker
+                equity = None
+                if hasattr(self.strategy, "get_equity"):
+                    equity = self.strategy.get_equity()
+                if equity is not None and getattr(self.strategy, "risk_manager", None):
+                    if self.strategy.risk_manager.update_equity(equity):
+                        reason = self.strategy.risk_manager.circuit_breaker_reason or "Max Drawdown Superato"
+                        self.logger.critical(f"🚨 [CIRCUIT BREAKER ATTIVATO] {reason}")
+                        if self.telegram:
+                            self.telegram.send_trade_alert(
+                                action="🚨 CIRCUIT BREAKER ATTIVATO",
+                                symbol="PORTFOLIO",
+                                size=0.0,
+                                price=0.0,
+                                pnl=None,
+                                notes=reason,
+                            )
+                        self.stop()
+                        break
+
                 # Periodic health / status report
                 if time.time() - last_status_time >= self.status_report_interval_seconds:
                     status = self.strategy.get_status()

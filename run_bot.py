@@ -103,6 +103,18 @@ def parse_args():
         help="Number of consecutive scans a token must maintain high APY before entering (default: 2)",
     )
     parser.add_argument(
+        "--max-apy",
+        type=float,
+        default=1000.0,
+        help="Anti-manipulation filter: ignore tokens with APY above this threshold (default: 1000%%)",
+    )
+    parser.add_argument(
+        "--trailing-exit",
+        type=float,
+        default=50.0,
+        help="Trailing APY exit: close position if APY drops by this %% from its peak (default: 50%%)",
+    )
+    parser.add_argument(
         "--spread-bps",
         type=float,
         default=8.0,
@@ -173,6 +185,8 @@ def main():
                 auto_compound=args.auto_compound,
                 min_open_interest_usd=args.min_oi_usd,
                 persistence_checks_required=args.persistence_checks,
+                max_entry_apy_pct=args.max_apy,
+                trailing_exit_pct=args.trailing_exit,
             )
         elif args.strategy == "market_maker":
             interval = args.interval if args.interval is not None else 10.0

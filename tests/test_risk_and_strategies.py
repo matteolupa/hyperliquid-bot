@@ -221,6 +221,307 @@ class TestRiskAndStrategies(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_dynamic_live_funding_accrual(self):
+        import tempfile
+        import shutil
+        from hyperliquid_bot.persistence import StatePersistenceManager
+        from hyperliquid_bot.strategies.funding_harvester import FundingHarvesterStrategy, ActiveFundingPosition
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            class MockInfo:
+                def __init__(self):
+                    self.current_rate = "0.0001"  # 87.6% APY
+
+                def meta_and_asset_ctxs(self):
+                    return [
+                        {"universe": [{"name": "TESTCOIN"}]},
+                        [{"funding": self.current_rate, "markPx": "10.0", "openInterest": "10000"}],
+                    ]
+
+            mock_info = MockInfo()
+            class MockClient:
+                info = mock_info
+
+            strategy = FundingHarvesterStrategy(
+                client=MockClient(),
+                allocation_per_position_usd=100.0,
+                dry_run=True,
+            )
+            strategy.persistence = StatePersistenceManager(data_dir=temp_dir, filename="test_accrual.json")
+            strategy.on_start()
+
+            # Create an existing position 1 hour ago
+            import time
+            start_t = time.time() - 3600.0
+            strategy.active_positions["TESTCOIN"] = ActiveFundingPosition(
+                coin="TESTCOIN",
+                size=10.0,
+                entry_price=10.0,
+                entry_time=start_t,
+                hourly_rate_at_entry=0.0001,
+                last_accrual_time=start_t,
+                current_hourly_rate=0.0001,
+            )
+
+            # Change rate in market to 0.0002
+            mock_info.current_rate = "0.0002"
+            strategy.on_tick()
+
+            # Pos should have accrued ~ 100$ * 0.0002 * 1h = ~$0.02
+            pos = strategy.active_positions["TESTCOIN"]
+            self.assertGreater(pos.accumulated_funding_usd, 0.015)
+            self.assertEqual(pos.current_hourly_rate, 0.0002)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_portfolio_notional_risk_check(self):
+        import tempfile
+        import shutil
+        from hyperliquid_bot.persistence import StatePersistenceManager
+        from hyperliquid_bot.risk import RiskManager, RiskLimits
+        from hyperliquid_bot.strategies.funding_harvester import FundingHarvesterStrategy
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            class MockInfo:
+                def meta_and_asset_ctxs(self):
+                    return [
+                        {"universe": [{"name": "COIN1"}, {"name": "COIN2"}]},
+                        [
+                            {"funding": "0.0001", "markPx": "10.0", "openInterest": "100000"},
+                            {"funding": "0.0001", "markPx": "10.0", "openInterest": "100000"},
+                        ],
+                    ]
+
+            class MockClient:
+                info = MockInfo()
+
+            # Set max total portfolio notional to $150 and max per position $120
+            risk = RiskManager(limits=RiskLimits(max_total_notional_usd=150.0, max_position_size_usd=120.0))
+            strategy = FundingHarvesterStrategy(
+                client=MockClient(),
+                risk_manager=risk,
+                allocation_per_position_usd=100.0,
+                persistence_checks_required=1,
+                max_positions=2,
+                dry_run=True,
+            )
+            strategy.persistence = StatePersistenceManager(data_dir=temp_dir, filename="test_risk.json")
+            strategy.on_start()
+
+            # Tick 1: should enter COIN1 ($100 notional)
+            strategy.on_tick()
+            self.assertIn("COIN1", strategy.active_positions)
+
+            # Tick 2: COIN2 ($100 notional) would make total portfolio $200 > $150 -> rejected by risk manager
+            strategy.on_tick()
+            self.assertNotIn("COIN2", strategy.active_positions)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_trailing_apy_exit(self):
+        """Ottimizzazione B: la posizione viene chiusa quando APY cala >50% dal picco."""
+        import tempfile
+        import shutil
+        import time
+        from hyperliquid_bot.persistence import StatePersistenceManager
+        from hyperliquid_bot.strategies.funding_harvester import (
+            FundingHarvesterStrategy,
+            ActiveFundingPosition,
+        )
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            class MockInfo:
+                def __init__(self):
+                    self.rate = "0.0001"  # APY ~87.6%
+
+                def meta_and_asset_ctxs(self):
+                    return [
+                        {"universe": [{"name": "TOKEN"}]},
+                        [{"funding": self.rate, "markPx": "1.0", "openInterest": "100000"}],
+                    ]
+
+            mock_info = MockInfo()
+
+            class MockClient:
+                info = mock_info
+
+            strategy = FundingHarvesterStrategy(
+                client=MockClient(),
+                allocation_per_position_usd=100.0,
+                trailing_exit_pct=50.0,
+                min_exit_apy_pct=1.0,  # bassa soglia assoluta per testare il trailing
+                dry_run=True,
+            )
+            strategy.persistence = StatePersistenceManager(data_dir=temp_dir, filename="test_trailing.json")
+            strategy.on_start()
+
+            # Create a position with peak_apy_pct = 100%
+            now = time.time()
+            strategy.active_positions["TOKEN"] = ActiveFundingPosition(
+                coin="TOKEN",
+                size=100.0,
+                entry_price=1.0,
+                entry_time=now - 100,
+                hourly_rate_at_entry=0.0001,
+                last_accrual_time=now - 1,
+                current_hourly_rate=0.0001,
+                peak_apy_pct=100.0,  # picco al 100%
+            )
+
+            # APY cala a 40% -> 60% di drop dal picco -> sopra la soglia del 50% -> chiude
+            mock_info.rate = str(40.0 / (24.0 * 365.0 * 100.0))
+            strategy.on_tick()
+            self.assertNotIn("TOKEN", strategy.active_positions, "Il trailing exit avrebbe dovuto chiudere la posizione")
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_max_apy_anti_manipulation_filter(self):
+        """Ottimizzazione G: token con APY > max_entry_apy_pct vengono ignorati in ingresso."""
+        import tempfile
+        import shutil
+        from hyperliquid_bot.persistence import StatePersistenceManager
+        from hyperliquid_bot.strategies.funding_harvester import FundingHarvesterStrategy
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            class MockInfo:
+                def meta_and_asset_ctxs(self):
+                    return [
+                        {"universe": [{"name": "MANIPULATION_COIN"}]},
+                        [{"funding": "0.2", "markPx": "1.0", "openInterest": "500000"}],
+                        # 0.2/h * 24 * 365 * 100 = 175200% APY -> enorme, è manipolazione
+                    ]
+
+            class MockClient:
+                info = MockInfo()
+
+            strategy = FundingHarvesterStrategy(
+                client=MockClient(),
+                allocation_per_position_usd=100.0,
+                max_entry_apy_pct=500.0,  # limite al 500%
+                persistence_checks_required=1,
+                dry_run=True,
+            )
+            strategy.persistence = StatePersistenceManager(data_dir=temp_dir, filename="test_maxapy.json")
+            strategy.on_start()
+            strategy.on_tick()
+
+            # Non deve essere entrato nonostante OI sufficiente
+            self.assertNotIn("MANIPULATION_COIN", strategy.active_positions)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_ledger_csv_written_on_close(self):
+        """Ottimizzazione F: il ledger CSV viene scritto quando una posizione viene chiusa."""
+        import tempfile
+        import shutil
+        import os
+        import time
+        from hyperliquid_bot.persistence import StatePersistenceManager
+        from hyperliquid_bot.ledger import FundingLedger
+        from hyperliquid_bot.strategies.funding_harvester import (
+            FundingHarvesterStrategy,
+            ActiveFundingPosition,
+        )
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            class MockInfo:
+                def meta_and_asset_ctxs(self):
+                    # APY = 0 -> posizione viene chiusa
+                    return [
+                        {"universe": [{"name": "EXITCOIN"}]},
+                        [{"funding": "0.000001", "markPx": "1.0", "openInterest": "100000"}],
+                    ]
+
+            class MockClient:
+                info = MockInfo()
+
+            strategy = FundingHarvesterStrategy(
+                client=MockClient(),
+                allocation_per_position_usd=100.0,
+                min_exit_apy_pct=5.0,
+                dry_run=True,
+            )
+            strategy.persistence = StatePersistenceManager(data_dir=temp_dir, filename="test_ledger.json")
+            strategy.ledger = FundingLedger(data_dir=temp_dir, dry_run=True)
+            strategy.on_start()
+
+            # Inject a position that will be exited (current APY ~0.876% < 5% exit threshold)
+            now = time.time()
+            strategy.active_positions["EXITCOIN"] = ActiveFundingPosition(
+                coin="EXITCOIN",
+                size=100.0,
+                entry_price=1.0,
+                entry_time=now - 3600,
+                hourly_rate_at_entry=0.001,
+                last_accrual_time=now - 1,
+                current_hourly_rate=0.001,
+                peak_apy_pct=8.76,
+            )
+
+            strategy.on_tick()
+
+            # EXITCOIN should have been closed
+            self.assertNotIn("EXITCOIN", strategy.active_positions)
+
+            # Check CSV ledger was written
+            ledger_path = os.path.join(temp_dir, "funding_ledger_dry.csv")
+            self.assertTrue(os.path.exists(ledger_path))
+            with open(ledger_path, "r") as f:
+                content = f.read()
+            self.assertIn("EXITCOIN", content)
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def test_candidate_seen_count_persistence(self):
+        """Ottimizzazione I: candidate_seen_count viene salvato e ripristinato correttamente."""
+        import tempfile
+        import shutil
+        from hyperliquid_bot.persistence import StatePersistenceManager
+        from hyperliquid_bot.strategies.funding_harvester import FundingHarvesterStrategy
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            class MockInfo:
+                def meta_and_asset_ctxs(self):
+                    return [
+                        {"universe": [{"name": "WATCHED"}]},
+                        [{"funding": "0.0002", "markPx": "1.0", "openInterest": "100000"}],
+                    ]
+
+            class MockClient:
+                info = MockInfo()
+
+            strategy = FundingHarvesterStrategy(
+                client=MockClient(),
+                persistence_checks_required=3,
+                dry_run=True,
+            )
+            strategy.persistence = StatePersistenceManager(data_dir=temp_dir, filename="test_persist.json")
+            strategy.on_start()
+
+            # Tick 1: candidato visto 1 volta
+            strategy.on_tick()
+            self.assertEqual(strategy.candidate_seen_count.get("WATCHED"), 1)
+
+            # Simula riavvio: crea una nuova strategia con la stessa persistence
+            strategy2 = FundingHarvesterStrategy(
+                client=MockClient(),
+                persistence_checks_required=3,
+                dry_run=True,
+            )
+            strategy2.persistence = StatePersistenceManager(data_dir=temp_dir, filename="test_persist.json")
+            strategy2.on_start()
+
+            # Il contatore deve essere ripristinato a 1 (non azzerato)
+            self.assertEqual(strategy2.candidate_seen_count.get("WATCHED"), 1)
+        finally:
+            shutil.rmtree(temp_dir)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -48,3 +48,7 @@ class BaseStrategy(ABC):
     def get_status(self) -> Dict[str, Any]:
         """Return diagnostic metrics and strategy status."""
         pass
+
+    def get_equity(self) -> Optional[float]:
+        """Return current strategy equity for risk and drawdown monitoring."""
+        return None

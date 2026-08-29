@@ -19,6 +19,7 @@ from .strategies import (
     ScalperStrategy,
     ScalperTrade,
 )
+from .ledger import FundingLedger
 from .telegram import TelegramNotifier
 
 __all__ = [
@@ -40,6 +41,7 @@ __all__ = [
     "BotEngine",
     "setup_logger",
     "TelegramNotifier",
+    "FundingLedger",
 ]
 
 __version__ = "0.1.0"

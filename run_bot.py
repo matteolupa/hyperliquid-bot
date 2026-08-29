@@ -118,13 +118,13 @@ def parse_args():
         "--spread-bps",
         type=float,
         default=8.0,
-        help="Base Bid/Ask spread in basis points for Market Maker (1 bps = 0.01%)",
+        help="Base Bid/Ask spread in basis points for Market Maker (1 bps = 0.01%%)",
     )
     parser.add_argument(
         "--max-drawdown-pct",
         type=float,
         default=5.0,
-        help="Emergency Circuit Breaker max drawdown percentage (e.g. 5.0 for 5%)",
+        help="Emergency Circuit Breaker max drawdown percentage (e.g. 5.0 for 5%%)",
     )
 
     return parser.parse_args()

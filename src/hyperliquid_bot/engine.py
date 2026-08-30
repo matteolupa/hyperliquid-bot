@@ -83,6 +83,10 @@ class BotEngine:
         self.logger.info("=" * 65)
 
         if self.telegram:
+            self.telegram.register_command("/status", self._cmd_status)
+            self.telegram.register_command("/balance", self._cmd_balance)
+            self.telegram.register_command("/closeall", self._cmd_closeall)
+            self.telegram.start_polling()
             self.telegram.send_startup(
                 strategy_name=self.strategy.name,
                 mode=mode_str,
@@ -192,6 +196,26 @@ class BotEngine:
 
         self.logger.info("Bot Engine loop terminato.")
 
+    def _cmd_status(self) -> str:
+        """Handle /status command from Telegram."""
+        status = self.strategy.get_status()
+        if "formatted_report" in status:
+            return f"<pre>{status['formatted_report'].strip()}</pre>"
+        return f"<pre>{str(status)}</pre>"
+
+    def _cmd_balance(self) -> str:
+        """Handle /balance command from Telegram."""
+        if hasattr(self.strategy, "get_balance_report"):
+            return self.strategy.get_balance_report()
+        equity = self.strategy.get_equity() or 0.0
+        return f"🏦 <b>Stato Saldo:</b>\n▫️ <b>Equity Totale:</b> ${equity:,.2f} USD"
+
+    def _cmd_closeall(self) -> str:
+        """Handle /closeall command from Telegram."""
+        if hasattr(self.strategy, "close_all_positions"):
+            return self.strategy.close_all_positions(reason="Chiusura manuale da comando Telegram /closeall")
+        return "ℹ️ <b>Nessuna posizione attiva da chiudere.</b>"
+
     def stop(self) -> None:
         """Gracefully stop the bot engine and cleanup strategy."""
         if not self.is_running:
@@ -199,6 +223,8 @@ class BotEngine:
         self.is_running = False
         self.logger.info("Arresto in corso: pulizia ordini e salvataggio stato...")
         try:
+            if self.telegram:
+                self.telegram.stop_polling()
             self.strategy.on_stop()
             if self.telegram:
                 self.telegram.send_shutdown(

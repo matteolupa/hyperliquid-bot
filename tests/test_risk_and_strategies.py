@@ -522,6 +522,114 @@ class TestRiskAndStrategies(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_telegram_interactive_commands(self):
+        """Test registrazione ed esecuzione comandi Telegram interattivi."""
+        from hyperliquid_bot.telegram import TelegramNotifier
+
+        notifier = TelegramNotifier(bot_token="test_token", chat_id="12345")
+        notifier.register_command("/status", lambda: "REPORT_OK")
+        notifier.register_command("balance", lambda: "BALANCE_OK")
+
+        # Mock send_message
+        sent_messages = []
+        notifier.send_message = lambda msg: sent_messages.append(msg)
+
+        # 1. Update from authorized chat
+        update_valid = {
+            "update_id": 1,
+            "message": {
+                "chat": {"id": 12345},
+                "text": "/status",
+            },
+        }
+        notifier._handle_update(update_valid)
+        self.assertIn("REPORT_OK", sent_messages)
+
+        # 2. Update with /balance
+        update_balance = {
+            "update_id": 2,
+            "message": {
+                "chat": {"id": 12345},
+                "text": "/balance",
+            },
+        }
+        notifier._handle_update(update_balance)
+        self.assertIn("BALANCE_OK", sent_messages)
+
+        # 3. Update with /help
+        update_help = {
+            "update_id": 3,
+            "message": {
+                "chat": {"id": 12345},
+                "text": "/help",
+            },
+        }
+        notifier._handle_update(update_help)
+        self.assertTrue(any("Comandi Disponibili" in m for m in sent_messages))
+
+        # 4. Unauthorized chat update (should be ignored)
+        update_unauthorized = {
+            "update_id": 4,
+            "message": {
+                "chat": {"id": 99999},  # Wrong ID
+                "text": "/status",
+            },
+        }
+        sent_count_before = len(sent_messages)
+        notifier._handle_update(update_unauthorized)
+        self.assertEqual(len(sent_messages), sent_count_before)
+
+    def test_funding_strategy_closeall_and_balance(self):
+        """Test metodi close_all_positions e get_balance_report di FundingHarvesterStrategy."""
+        import tempfile
+        import shutil
+        import time
+        from hyperliquid_bot.persistence import StatePersistenceManager
+        from hyperliquid_bot.ledger import FundingLedger
+        from hyperliquid_bot.strategies.funding_harvester import (
+            FundingHarvesterStrategy,
+            ActiveFundingPosition,
+        )
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            class MockClient:
+                pass
+
+            strategy = FundingHarvesterStrategy(
+                client=MockClient(),
+                allocation_per_position_usd=150.0,
+                dry_run=True,
+            )
+            strategy.persistence = StatePersistenceManager(data_dir=temp_dir, filename="test_close.json")
+            strategy.ledger = FundingLedger(data_dir=temp_dir, dry_run=True)
+            strategy.on_start()
+
+            # Add two positions
+            now = time.time()
+            strategy.active_positions["COIN_A"] = ActiveFundingPosition(
+                coin="COIN_A", size=10.0, entry_price=15.0, entry_time=now - 3600, hourly_rate_at_entry=0.0001
+            )
+            strategy.active_positions["COIN_B"] = ActiveFundingPosition(
+                coin="COIN_B", size=5.0, entry_price=30.0, entry_time=now - 3600, hourly_rate_at_entry=0.0002
+            )
+
+            # Test get_balance_report
+            bal_report = strategy.get_balance_report()
+            self.assertIn("Stato Portafoglio", bal_report)
+            self.assertIn("Equity Totale", bal_report)
+
+            # Test close_all_positions
+            res = strategy.close_all_positions(reason="Test Close")
+            self.assertIn("Chiusura di Emergenza Completata", res)
+            self.assertEqual(len(strategy.active_positions), 0)
+
+            # Calling close_all again when empty
+            res_empty = strategy.close_all_positions()
+            self.assertIn("Nessuna posizione attiva", res_empty)
+        finally:
+            shutil.rmtree(temp_dir)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -52,3 +52,17 @@ class BaseStrategy(ABC):
     def get_equity(self) -> Optional[float]:
         """Return current strategy equity for risk and drawdown monitoring."""
         return None
+
+    def close_all_positions(self, reason: str = "Chiusura manuale da comando Telegram") -> str:
+        """Emergency/manual closure of all active positions."""
+        return "Nessuna posizione attiva da chiudere."
+
+    def get_balance_report(self) -> str:
+        """Return formatted balance and portfolio status."""
+        equity = self.get_equity() or 0.0
+        return (
+            f"🏦 <b>Stato Portafoglio & Margine:</b>\n\n"
+            f"▫️ <b>Strategia:</b> <code>{self.name}</code>\n"
+            f"▫️ <b>Equity Totale:</b> <b>${equity:,.2f} USD</b>\n"
+            f"▫️ <b>Modalità:</b> {'DRY-RUN (Simulazione)' if self.dry_run else 'LIVE TRADING'}"
+        )

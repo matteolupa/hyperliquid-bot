@@ -469,10 +469,89 @@ class FundingHarvesterStrategy(BaseStrategy):
                     "size": p.size,
                     "entry_price": p.entry_price,
                     "estimated_funding_usd": round(p.accumulated_funding_usd, 4),
-                    "apy": round(self.calculate_apy(p.hourly_rate_at_entry), 2),
+                    "apy": round(self.calculate_apy(p.current_hourly_rate or p.hourly_rate_at_entry), 2),
                 }
                 for coin, p in self.active_positions.items()
             },
             "total_funding_earned_usd": round(self.total_funding_earned_usd, 4),
             "formatted_report": self.format_status_report(),
         }
+
+    def close_all_positions(self, reason: str = "Chiusura di emergenza manuale da Telegram") -> str:
+        """Emergency/manual closure of all active positions."""
+        if not self.active_positions:
+            return "ℹ️ <b>Nessuna posizione attiva da chiudere al momento.</b>"
+
+        now = time.time()
+        closed_coins = []
+        total_closed_funding = 0.0
+
+        for coin, pos in list(self.active_positions.items()):
+            # Calculate final accrued funding
+            last_time = pos.last_accrual_time or pos.entry_time
+            delta_hours = max(0.0, (now - last_time) / 3600.0)
+            if delta_hours > 0:
+                delta_funding = self.calculate_funding_payment(
+                    pos.size * pos.entry_price, pos.current_hourly_rate or pos.hourly_rate_at_entry
+                ) * delta_hours
+                pos.accumulated_funding_usd += delta_funding
+
+            # Record to CSV ledger
+            self.ledger.record_close(
+                coin=coin,
+                size=pos.size,
+                entry_price=pos.entry_price,
+                entry_time=pos.entry_time,
+                exit_time=now,
+                apy_entry_pct=self.calculate_apy(pos.hourly_rate_at_entry),
+                apy_exit_pct=self.calculate_apy(pos.current_hourly_rate or pos.hourly_rate_at_entry),
+                funding_usd=pos.accumulated_funding_usd,
+                exit_reason=reason,
+                dry_run=self.dry_run,
+            )
+
+            total_closed_funding += pos.accumulated_funding_usd
+            self.total_funding_earned_usd += pos.accumulated_funding_usd
+            closed_coins.append(coin)
+            del self.active_positions[coin]
+
+        self._save_state()
+        logger.info(f"🚨 [CLOSE ALL] Chiuse forzatamente tutte le posizioni ({closed_coins}). Funding: +${total_closed_funding:.4f}")
+
+        coins_str = ", ".join(closed_coins)
+        return (
+            f"🛑 <b>Chiusura di Emergenza Completata!</b>\n\n"
+            f"▫️ <b>Posizioni chiuse:</b> <code>{coins_str}</code>\n"
+            f"▫️ <b>Funding totale incassato:</b> 🟢 <b>+${total_closed_funding:.4f} USD</b>\n"
+            f"▫️ <b>Nuovo storico totale:</b> <b>+${self.total_funding_earned_usd:.4f} USD</b>\n"
+            f"▫️ <i>Stato salvato su disco e registrato nel Ledger CSV.</i>"
+        )
+
+    def get_balance_report(self) -> str:
+        """Return formatted balance and portfolio status."""
+        total_allocated = sum(p.size * p.entry_price for p in self.active_positions.values())
+        total_accrued = sum(p.accumulated_funding_usd for p in self.active_positions.values())
+        total_lifetime = self.total_funding_earned_usd + total_accrued
+        equity = self.get_equity()
+        daily_rate = sum(
+            self.calculate_funding_payment(p.size * p.entry_price, p.current_hourly_rate or p.hourly_rate_at_entry)
+            for p in self.active_positions.values()
+        ) * 24.0
+
+        msg = (
+            f"🏦 <b>Stato Portafoglio & Margine</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"▫️ <b>Equity Totale:</b> <b>${equity:,.2f} USD</b>\n"
+            f"▫️ <b>Capitale Allocato:</b> ${total_allocated:,.2f} ({len(self.active_positions)}/{self.max_positions} slot)\n"
+            f"▫️ <b>Taglia Base per Slot:</b> ${self.base_allocation_usd:,.2f}\n"
+        )
+        if self.auto_compound:
+            msg += f"▫️ <b>Taglia Corrente Compounded:</b> <b>${self.current_allocation_usd:.2f}</b>\n"
+        msg += (
+            f"▫️ <b>Funding Maturato Attuale:</b> +${total_accrued:.4f} USD\n"
+            f"▫️ <b>Totale Storico Incassato:</b> 🟢 <b>+${total_lifetime:.4f} USD</b>\n"
+            f"▫️ <b>Rendita Giornaliera Attuale:</b> +${daily_rate:.2f}/giorno\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"<i>Modalità: {'DRY-RUN (Simulazione)' if self.dry_run else 'LIVE TRADING'}</i>"
+        )
+        return msg

@@ -1,5 +1,6 @@
 """Telegram Notification & Command Listener module for Hyperliquid Bot."""
 
+import html
 import json
 import logging
 import threading
@@ -81,7 +82,10 @@ class TelegramNotifier:
                         data = json.loads(resp.read().decode("utf-8"))
                         for update in data.get("result", []):
                             self._last_update_id = update["update_id"]
-                            self._handle_update(update)
+                            try:
+                                self._handle_update(update)
+                            except Exception as ue:
+                                logger.error(f"Errore gestione update Telegram: {ue}")
             except Exception:
                 time.sleep(2.0)
             time.sleep(0.5)
@@ -114,7 +118,7 @@ class TelegramNotifier:
                     self.send_message(response)
             except Exception as e:
                 logger.error(f"Errore durante l'esecuzione del comando {cmd_part}: {e}")
-                self.send_message(f"❌ <b>Errore durante l'esecuzione del comando:</b> {e}")
+                self.send_message(f"❌ <b>Errore durante l'esecuzione del comando:</b> {html.escape(str(e))}")
         elif cmd_part in ["/start", "/help"]:
             help_msg = (
                 "🤖 <b>Comandi Disponibili Hyperliquid Bot:</b>\n\n"
@@ -125,10 +129,10 @@ class TelegramNotifier:
             )
             self.send_message(help_msg)
         else:
-            self.send_message(f"❓ Comando non riconosciuto: <code>{cmd_part}</code>\nInvia /help per la lista comandi.")
+            self.send_message(f"❓ Comando non riconosciuto: <code>{html.escape(cmd_part)}</code>\nInvia /help per la lista comandi.")
 
-    def send_message(self, message: str) -> bool:
-        """Send a plain text or Markdown message to Telegram chat."""
+    def send_message(self, message: str, parse_mode: Optional[str] = "HTML") -> bool:
+        """Send a message to Telegram chat with automatic plain-text fallback if HTML parsing fails."""
         if not self.is_enabled:
             return False
 
@@ -136,9 +140,10 @@ class TelegramNotifier:
         payload = {
             "chat_id": self.chat_id,
             "text": message,
-            "parse_mode": "HTML",
             "disable_web_page_preview": True,
         }
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
 
         try:
             req = urllib.request.Request(
@@ -150,6 +155,20 @@ class TelegramNotifier:
                 if response.status == 200:
                     return True
         except Exception as e:
+            # If HTML parsing failed, try sending as plain text without parse_mode as fallback
+            if parse_mode:
+                try:
+                    payload.pop("parse_mode", None)
+                    req_fallback = urllib.request.Request(
+                        url,
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json", "User-Agent": "HyperliquidBot/1.0"},
+                    )
+                    with urllib.request.urlopen(req_fallback, timeout=10) as response:
+                        if response.status == 200:
+                            return True
+                except Exception:
+                    pass
             logger.warning(f"Impossibile inviare messaggio Telegram: {e}")
 
         return False
@@ -158,11 +177,11 @@ class TelegramNotifier:
         """Send bot startup notification."""
         msg = (
             f"🚀 <b>Hyperliquid Bot Avviato!</b>\n\n"
-            f"▫️ <b>Strategia:</b> <code>{strategy_name}</code>\n"
-            f"▫️ <b>Modalità:</b> <code>{mode}</code>\n"
+            f"▫️ <b>Strategia:</b> <code>{html.escape(strategy_name)}</code>\n"
+            f"▫️ <b>Modalità:</b> <code>{html.escape(mode)}</code>\n"
         )
         if details:
-            msg += f"▫️ <b>Dettagli:</b> {details}\n"
+            msg += f"▫️ <b>Dettagli:</b> {html.escape(details)}\n"
         msg += (
             f"\n<i>Il bot è ora attivo 24/7.</i>\n"
             f"💡 <i>Invia /help per visualizzare i comandi interattivi disponibili.</i>"
@@ -170,8 +189,9 @@ class TelegramNotifier:
         self.send_message(msg)
 
     def send_status_report(self, report_text: str) -> None:
-        """Send formatted status report."""
-        msg = f"<pre>{report_text.strip()}</pre>"
+        """Send formatted status report with HTML entity escaping."""
+        escaped_report = html.escape(report_text.strip())
+        msg = f"<pre>{escaped_report}</pre>"
         self.send_message(msg)
 
     def send_trade_alert(
@@ -194,15 +214,15 @@ class TelegramNotifier:
             emoji = "📊"
 
         msg = (
-            f"{emoji} <b>{action} ({symbol})</b>\n\n"
-            f"▫️ <b>Size:</b> {size:.4f} {symbol} (${size * price:,.2f})\n"
+            f"{emoji} <b>{html.escape(action)} ({html.escape(symbol)})</b>\n\n"
+            f"▫️ <b>Size:</b> {size:.4f} {html.escape(symbol)} (${size * price:,.2f})\n"
             f"▫️ <b>Prezzo:</b> ${price:,.2f}\n"
         )
         if pnl is not None:
             pnl_emoji = "🟢" if pnl >= 0 else "🔴"
             msg += f"▫️ <b>PnL Netto:</b> {pnl_emoji} <b>${pnl:+.4f} USD</b>\n"
         if notes:
-            msg += f"▫️ <b>Note:</b> {notes}\n"
+            msg += f"▫️ <b>Note:</b> {html.escape(notes)}\n"
 
         self.send_message(msg)
 
@@ -218,7 +238,7 @@ class TelegramNotifier:
     ) -> None:
         """Send elegant daily midnight earnings report."""
         msg = (
-            f"🌙 <b>REPORT GIORNALIERO BOT ({date_str})</b>\n"
+            f"🌙 <b>REPORT GIORNALIERO BOT ({html.escape(date_str)})</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
             f"💰 <b>Guadagno 24h:</b> 🟢 <b>+${daily_earnings_usd:.4f} USD</b>\n"
             f"📈 <b>ROI Giornaliero:</b> <b>+{daily_roi_pct:.2f}%</b>\n"
@@ -231,7 +251,7 @@ class TelegramNotifier:
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
         )
         if positions_summary:
-            msg += f"<b>Posizioni Attive:</b>\n{positions_summary}\n"
+            msg += f"<b>Posizioni Attive:</b>\n{html.escape(positions_summary)}\n"
         msg += f"<i>Il bot continua a macinare rendita 24/7. Buonanotte!</i> 😴"
 
         self.send_message(msg)

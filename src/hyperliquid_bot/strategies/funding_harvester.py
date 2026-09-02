@@ -594,24 +594,32 @@ class FundingHarvesterStrategy(BaseStrategy):
         return msg
 
     def get_history_report(self, limit: int = 5) -> str:
-        """Format the latest closed trades from the CSV ledger."""
+        """Format the latest closed trades from the CSV ledger safely."""
         trades = self.ledger.get_recent_trades(limit=limit)
         if not trades:
             return "ℹ️ <b>Nessuna operazione chiusa registrata nel ledger finora.</b>"
+
+        def _safe_float(val: Any, default: float = 0.0) -> float:
+            try:
+                if val is None or str(val).strip() == "":
+                    return default
+                return float(str(val).strip())
+            except (ValueError, TypeError):
+                return default
 
         lines = [
             f"📜 <b>Ultime {len(trades)} Posizioni Chiuse (Ledger)</b>",
             "━━━━━━━━━━━━━━━━━━━━━━",
         ]
         for t in reversed(trades):
-            coin = t.get("coin", "UNKNOWN")
-            side = t.get("side", "SHORT")
+            coin = t.get("coin") or "UNKNOWN"
+            side = t.get("side") or "SHORT"
             side_badge = "🔴 SHORT" if side == "SHORT" else "🟢 LONG"
-            funding = float(t.get("funding_usd", 0.0))
-            duration = float(t.get("duration_hours", 0.0))
-            apy_in = float(t.get("apy_entry_pct", 0.0))
-            apy_out = float(t.get("apy_exit_pct", 0.0))
-            reason = t.get("exit_reason", "Chiusura")
+            funding = _safe_float(t.get("funding_usd"))
+            duration = _safe_float(t.get("duration_hours"))
+            apy_in = _safe_float(t.get("apy_entry_pct"))
+            apy_out = _safe_float(t.get("apy_exit_pct"))
+            reason = t.get("exit_reason") or "Chiusura"
 
             lines.append(
                 f"• <b>{coin}</b> ({side_badge}) | ⏱️ {duration:.1f}h\n"

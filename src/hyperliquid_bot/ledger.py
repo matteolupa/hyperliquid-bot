@@ -37,7 +37,7 @@ class FundingLedger:
         self._ensure_header()
 
     def _ensure_header(self) -> None:
-        """Crea il file CSV con intestazioni se non esiste."""
+        """Crea il file CSV con intestazioni se non esiste o migra vecchi file senza 'side'."""
         if not os.path.exists(self.filepath):
             try:
                 with open(self.filepath, "w", newline="", encoding="utf-8") as f:
@@ -46,6 +46,24 @@ class FundingLedger:
                 logger.info(f"📒 Ledger contabile creato: {self.filepath}")
             except Exception as e:
                 logger.error(f"Errore creazione ledger: {e}")
+        else:
+            # Check if existing CSV has old headers (missing 'side')
+            try:
+                with open(self.filepath, "r", newline="", encoding="utf-8") as f:
+                    first_line = f.readline()
+                if first_line and "side" not in first_line:
+                    with open(self.filepath, "r", newline="", encoding="utf-8") as f:
+                        old_rows = list(csv.DictReader(f))
+                    with open(self.filepath, "w", newline="", encoding="utf-8") as f:
+                        writer = csv.DictWriter(f, fieldnames=self.HEADERS, extrasaction="ignore")
+                        writer.writeheader()
+                        for row in old_rows:
+                            if "side" not in row or not row["side"]:
+                                row["side"] = "SHORT"
+                            writer.writerow(row)
+                    logger.info(f"📒 Ledger aggiornato con successo con la colonna 'side': {self.filepath}")
+            except Exception as e:
+                logger.warning(f"Controllo header ledger: {e}")
 
     def record_close(
         self,

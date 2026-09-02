@@ -630,6 +630,66 @@ class TestRiskAndStrategies(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_negative_funding_arbitrage(self):
+        """Test arbitraggio funding negativo: acquisto LONG su tassi negativi e ricezione pagamenti."""
+        import tempfile
+        import shutil
+        import time
+        from hyperliquid_bot.persistence import StatePersistenceManager
+        from hyperliquid_bot.strategies.funding_harvester import FundingHarvesterStrategy
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            class MockInfo:
+                def __init__(self):
+                    # Negative rate: -0.0002/h = -175.2% APY (shorts pay longs)
+                    self.rate = "-0.0002"
+
+                def meta_and_asset_ctxs(self):
+                    return [
+                        {"universe": [{"name": "PANIC_COIN"}]},
+                        [{"funding": self.rate, "markPx": "10.0", "openInterest": "100000"}],
+                    ]
+
+            mock_info = MockInfo()
+
+            class MockClient:
+                info = mock_info
+
+            strategy = FundingHarvesterStrategy(
+                client=MockClient(),
+                allocation_per_position_usd=100.0,
+                persistence_checks_required=1,
+                allow_negative_funding=True,
+                dry_run=True,
+            )
+            strategy.persistence = StatePersistenceManager(data_dir=temp_dir, filename="test_neg.json")
+            strategy.on_start()
+
+            # 1. Scan opportunities detects side="LONG" with positive effective APY
+            opps = strategy.scan_opportunities()
+            self.assertEqual(len(opps), 1)
+            self.assertEqual(opps[0].side, "LONG")
+            self.assertAlmostEqual(opps[0].annualized_apy_pct, 175.2, places=1)
+
+            # 2. Enter position on tick
+            strategy.on_tick()
+            self.assertIn("PANIC_COIN", strategy.active_positions)
+            pos = strategy.active_positions["PANIC_COIN"]
+            self.assertEqual(pos.side, "LONG")
+
+            # 3. Simulate 1 hour passing and verify positive funding accrual
+            pos.last_accrual_time = time.time() - 3600
+            strategy.on_tick()
+            self.assertGreater(pos.accumulated_funding_usd, 0.0)
+
+            # 4. If rate decays below exit threshold (e.g. -0.000001 = 0.87% APY < 3%), position exits
+            mock_info.rate = "-0.000001"
+            strategy.on_tick()
+            self.assertNotIn("PANIC_COIN", strategy.active_positions, "Position should exit when funding rate decays below threshold")
+        finally:
+            shutil.rmtree(temp_dir)
+
 
 if __name__ == "__main__":
     unittest.main()

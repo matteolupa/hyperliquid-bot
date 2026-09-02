@@ -115,6 +115,12 @@ def parse_args():
         help="Trailing APY exit: close position if APY drops by this %% from its peak (default: 50%%)",
     )
     parser.add_argument(
+        "--allow-negative-funding",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable Negative Funding Arbitrage (harvest funding by going Long on negative funding rates)",
+    )
+    parser.add_argument(
         "--spread-bps",
         type=float,
         default=8.0,
@@ -187,6 +193,7 @@ def main():
                 persistence_checks_required=args.persistence_checks,
                 max_entry_apy_pct=args.max_apy,
                 trailing_exit_pct=args.trailing_exit,
+                allow_negative_funding=args.allow_negative_funding,
             )
         elif args.strategy == "market_maker":
             interval = args.interval if args.interval is not None else 10.0

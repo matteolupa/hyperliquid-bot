@@ -23,9 +23,11 @@ class FundingOpportunity:
 
     coin: str
     mark_price: float
-    hourly_funding_rate: float
-    annualized_apy_pct: float
+    hourly_funding_rate: float        # Effective positive yield rate (|raw_funding|)
+    annualized_apy_pct: float         # Annualized yield APY
     open_interest_usd: float
+    side: str = "SHORT"               # "SHORT" (when funding > 0) or "LONG" (when funding < 0)
+    raw_funding_rate: float = 0.0     # Original raw funding rate on exchange
 
 
 @dataclass
@@ -41,6 +43,7 @@ class ActiveFundingPosition:
     last_accrual_time: Optional[float] = None
     current_hourly_rate: Optional[float] = None
     peak_apy_pct: Optional[float] = None  # Highest APY observed since entry (for trailing exit)
+    side: str = "SHORT"                   # "SHORT" or "LONG"
 
     def __post_init__(self):
         if self.last_accrual_time is None:
@@ -53,7 +56,7 @@ class ActiveFundingPosition:
 
 
 class FundingHarvesterStrategy(BaseStrategy):
-    """Monitors and harvests positive funding rates on Hyperliquid."""
+    """Monitors and harvests positive and negative funding rates on Hyperliquid."""
 
     def __init__(
         self,
@@ -71,6 +74,7 @@ class FundingHarvesterStrategy(BaseStrategy):
         auto_compound: bool = True,
         min_open_interest_usd: float = 50_000.0,  # Minimum Open Interest in USD to prevent illiquid slippage
         persistence_checks_required: int = 2,  # Number of consecutive ticks candidate must hold high APY
+        allow_negative_funding: bool = True,   # Negative funding arbitrage (go Long when funding is negative)
     ):
         super().__init__(
             client=client,
@@ -89,6 +93,7 @@ class FundingHarvesterStrategy(BaseStrategy):
         self.auto_compound = auto_compound
         self.min_open_interest_usd = min_open_interest_usd
         self.persistence_checks_required = max(1, persistence_checks_required)
+        self.allow_negative_funding = allow_negative_funding
         self.candidate_seen_count: Dict[str, int] = {}
         self.active_positions: Dict[str, ActiveFundingPosition] = {}
         self.total_funding_earned_usd: float = 0.0
@@ -132,6 +137,7 @@ class FundingHarvesterStrategy(BaseStrategy):
                     "last_accrual_time": p.last_accrual_time,
                     "current_hourly_rate": p.current_hourly_rate,
                     "peak_apy_pct": p.peak_apy_pct,
+                    "side": p.side,
                 }
                 for coin, p in self.active_positions.items()
             },
@@ -160,6 +166,7 @@ class FundingHarvesterStrategy(BaseStrategy):
                 last_accrual_time=p_data.get("last_accrual_time", p_data["entry_time"]),
                 current_hourly_rate=p_data.get("current_hourly_rate", entry_rate),
                 peak_apy_pct=p_data.get("peak_apy_pct", entry_rate * 24.0 * 365.0 * 100.0),
+                side=p_data.get("side", "SHORT"),
             )
         if self.active_positions:
             logger.info(
@@ -185,7 +192,7 @@ class FundingHarvesterStrategy(BaseStrategy):
         return position_notional_usd * hourly_funding_rate
 
     def scan_opportunities(self) -> List[FundingOpportunity]:
-        """Scan all Hyperliquid markets for funding rate opportunities."""
+        """Scan all Hyperliquid markets for positive and negative funding rate opportunities."""
         opportunities = []
         try:
             meta_ctxs = self.client.info.meta_and_asset_ctxs()
@@ -199,16 +206,29 @@ class FundingHarvesterStrategy(BaseStrategy):
                 ctx = asset_ctxs[i]
 
                 funding_str = ctx.get("funding", "0")
-                hourly_funding = float(funding_str)
+                raw_hourly_funding = float(funding_str)
                 mark_price = float(ctx.get("markPx", "0"))
                 open_interest = float(ctx.get("openInterest", "0")) * mark_price
-                apy = self.calculate_apy(hourly_funding)
+
+                # Determine direction and effective harvest rate:
+                # Funding > 0 -> Go SHORT (longs pay shorts)
+                # Funding < 0 -> Go LONG (shorts pay longs)
+                if raw_hourly_funding >= 0:
+                    side = "SHORT"
+                    effective_rate = raw_hourly_funding
+                else:
+                    if not self.allow_negative_funding:
+                        continue
+                    side = "LONG"
+                    effective_rate = -raw_hourly_funding
+
+                apy = self.calculate_apy(effective_rate)
 
                 if apy >= min(self.min_entry_apy_pct, self.min_exit_apy_pct):
                     # Anti-manipulation: ignore absurd APY spikes (delisting/low-liquidity traps)
                     if apy > self.max_entry_apy_pct and coin not in self.active_positions:
                         logger.debug(
-                            f"🚫 [ANTI-MANIP] {coin} APY {apy:.0f}% supera il limite massimo "
+                            f"🚫 [ANTI-MANIP] {coin} ({side}) APY {apy:.0f}% supera il limite massimo "
                             f"({self.max_entry_apy_pct:.0f}%) — ignorato."
                         )
                         continue
@@ -221,9 +241,11 @@ class FundingHarvesterStrategy(BaseStrategy):
                         FundingOpportunity(
                             coin=coin,
                             mark_price=mark_price,
-                            hourly_funding_rate=hourly_funding,
+                            hourly_funding_rate=effective_rate,
                             annualized_apy_pct=round(apy, 2),
                             open_interest_usd=round(open_interest, 2),
+                            side=side,
+                            raw_funding_rate=raw_hourly_funding,
                         )
                     )
 
@@ -237,11 +259,12 @@ class FundingHarvesterStrategy(BaseStrategy):
         self.is_running = True
         self._restore_state()
         mode_str = "DRY-RUN (Simulazione)" if self.dry_run else "LIVE TRADING"
+        neg_funding_str = "ATTIVO (Long/Short)" if self.allow_negative_funding else "SOLO POSITIVO (Short)"
         logger.info(f"🚀 [{self.name}] Avviato in modalità: {mode_str}")
         logger.info(
             f"   Soglia Minima Ingresso: {self.min_entry_apy_pct}% APY | Uscita: {self.min_exit_apy_pct}% APY | "
             f"Max APY Ingresso: {self.max_entry_apy_pct:.0f}% | Trailing Exit: -{self.trailing_exit_pct:.0f}% dal picco | "
-            f"Min Open Interest: ${self.min_open_interest_usd:,.0f} | Persistenza: {self.persistence_checks_required} tick"
+            f"Negative Funding Arbitrage: {neg_funding_str} | Min OI: ${self.min_open_interest_usd:,.0f} | Persistenza: {self.persistence_checks_required} tick"
         )
 
     def _check_exit(self, coin: str, pos, current_apy: float, now: float) -> Optional[str]:
@@ -278,8 +301,17 @@ class FundingHarvesterStrategy(BaseStrategy):
         for coin, pos in list(self.active_positions.items()):
             # Find current live market rate
             current_opp = next((o for o in opportunities if o.coin == coin), None)
-            current_rate = current_opp.hourly_funding_rate if current_opp else (pos.current_hourly_rate or pos.hourly_rate_at_entry)
-            current_apy = current_opp.annualized_apy_pct if current_opp else 0.0
+            if current_opp:
+                if current_opp.side == pos.side:
+                    current_rate = current_opp.hourly_funding_rate
+                    current_apy = current_opp.annualized_apy_pct
+                else:
+                    # Funding flipped sign against our position! Rate is now negative for our position
+                    current_rate = -current_opp.hourly_funding_rate
+                    current_apy = 0.0
+            else:
+                current_rate = pos.current_hourly_rate or pos.hourly_rate_at_entry
+                current_apy = 0.0
 
             # Incrementally accrue simulated live funding based on exact elapsed time
             last_time = pos.last_accrual_time or pos.entry_time
@@ -300,12 +332,12 @@ class FundingHarvesterStrategy(BaseStrategy):
             exit_reason = self._check_exit(coin, pos, current_apy, now)
             if exit_reason:
                 logger.info(
-                    f"🔻 Chiusura posizione su {coin}: {exit_reason}. "
+                    f"🔻 Chiusura posizione su {coin} ({pos.side}): {exit_reason}. "
                     f"Funding incassato: ${pos.accumulated_funding_usd:.4f}"
                 )
                 if self.telegram:
                     self.telegram.send_trade_alert(
-                        action="Chiusura Delta-Neutral (Funding)",
+                        action=f"Chiusura Delta-Neutral ({pos.side})",
                         symbol=coin,
                         size=pos.size,
                         price=pos.entry_price,
@@ -323,6 +355,7 @@ class FundingHarvesterStrategy(BaseStrategy):
                     apy_exit_pct=current_apy,
                     funding_usd=pos.accumulated_funding_usd,
                     exit_reason=exit_reason,
+                    side=pos.side,
                     dry_run=self.dry_run,
                 )
                 self.total_funding_earned_usd += pos.accumulated_funding_usd
@@ -353,7 +386,7 @@ class FundingHarvesterStrategy(BaseStrategy):
 
             if current_seen < self.persistence_checks_required:
                 logger.info(
-                    f"⏳ [PERSISTENZA] {opp.coin} APY {opp.annualized_apy_pct}% rilevato ({current_seen}/{self.persistence_checks_required}). "
+                    f"⏳ [PERSISTENZA] {opp.coin} ({opp.side}) APY {opp.annualized_apy_pct}% rilevato ({current_seen}/{self.persistence_checks_required}). "
                     f"In attesa di conferma al prossimo tick..."
                 )
                 continue
@@ -383,19 +416,19 @@ class FundingHarvesterStrategy(BaseStrategy):
 
             if daily_funding_usd < round_trip["total_fee_usd"]:
                 logger.info(
-                    f"⚠️ Salto {opp.coin}: Funding giornaliero stimato (${daily_funding_usd:.4f}) "
+                    f"⚠️ Salto {opp.coin} ({opp.side}): Funding giornaliero stimato (${daily_funding_usd:.4f}) "
                     f"< Commissioni Round-Trip (${round_trip['total_fee_usd']:.4f})"
                 )
                 continue
 
             if self.dry_run:
                 logger.info(
-                    f"✅ [DRY-RUN] Entrata Delta-Neutral simulata su {opp.coin}: "
+                    f"✅ [DRY-RUN] Entrata Delta-Neutral simulata su {opp.coin} ({opp.side}): "
                     f"Size: {target_size:.4f} (${notional:,.2f}) @ APY {opp.annualized_apy_pct}%"
                 )
             else:
                 logger.info(
-                    f"🚀 [LIVE] Apertura posizione reale su {opp.coin}: Size: {target_size:.4f} (${notional:,.2f})"
+                    f"🚀 [LIVE] Apertura posizione reale su {opp.coin} ({opp.side}): Size: {target_size:.4f} (${notional:,.2f})"
                 )
                 # LIVE order placement via exchange wrapper can be called here
 
@@ -408,6 +441,7 @@ class FundingHarvesterStrategy(BaseStrategy):
                 accumulated_funding_usd=0.0,
                 last_accrual_time=now,
                 current_hourly_rate=opp.hourly_funding_rate,
+                side=opp.side,
             )
 
         # Persist state after each tick
@@ -445,8 +479,9 @@ class FundingHarvesterStrategy(BaseStrategy):
         for coin, p in self.active_positions.items():
             hours = (time.time() - p.entry_time) / 3600.0
             apy = self.calculate_apy(p.current_hourly_rate or p.hourly_rate_at_entry)
+            side_badge = "🔴 SHORT" if p.side == "SHORT" else "🟢 LONG"
             lines.append(
-                f"   • {coin:<5} | Size: {p.size:.4f} (${p.size * p.entry_price:,.2f}) | "
+                f"   • {coin:<5} ({side_badge}) | Size: {p.size:.4f} (${p.size * p.entry_price:,.2f}) | "
                 f"APY: {apy:>7.2f}% | Attiva da: {hours:.1f}h | "
                 f"Funding: +${p.accumulated_funding_usd:.4f}"
             )
@@ -466,6 +501,7 @@ class FundingHarvesterStrategy(BaseStrategy):
             "compounded_boost_usd": round(total_lifetime if self.auto_compound else 0.0, 4),
             "active_positions": {
                 coin: {
+                    "side": p.side,
                     "size": p.size,
                     "entry_price": p.entry_price,
                     "estimated_funding_usd": round(p.accumulated_funding_usd, 4),
@@ -507,12 +543,13 @@ class FundingHarvesterStrategy(BaseStrategy):
                 apy_exit_pct=self.calculate_apy(pos.current_hourly_rate or pos.hourly_rate_at_entry),
                 funding_usd=pos.accumulated_funding_usd,
                 exit_reason=reason,
+                side=pos.side,
                 dry_run=self.dry_run,
             )
 
             total_closed_funding += pos.accumulated_funding_usd
             self.total_funding_earned_usd += pos.accumulated_funding_usd
-            closed_coins.append(coin)
+            closed_coins.append(f"{coin} ({pos.side})")
             del self.active_positions[coin]
 
         self._save_state()

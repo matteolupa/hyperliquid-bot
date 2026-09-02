@@ -15,6 +15,7 @@ class FundingLedger:
     HEADERS = [
         "data_chiusura",
         "coin",
+        "side",
         "size",
         "entry_price",
         "notional_usd",
@@ -57,6 +58,7 @@ class FundingLedger:
         apy_exit_pct: float,
         funding_usd: float,
         exit_reason: str,
+        side: str = "SHORT",
         dry_run: bool = True,
     ) -> None:
         """Registra una posizione chiusa nel ledger CSV."""
@@ -69,6 +71,7 @@ class FundingLedger:
         row = {
             "data_chiusura": date_str,
             "coin": coin,
+            "side": side,
             "size": round(size, 6),
             "entry_price": round(entry_price, 6),
             "notional_usd": round(notional_usd, 2),
@@ -87,7 +90,7 @@ class FundingLedger:
                 writer = csv.DictWriter(f, fieldnames=self.HEADERS)
                 writer.writerow(row)
             logger.info(
-                f"📒 [LEDGER] {coin} chiuso: +${funding_usd:.4f} USD | "
+                f"📒 [LEDGER] {coin} ({side}) chiuso: +${funding_usd:.4f} USD | "
                 f"{duration_hours:.1f}h | APY entrata: {apy_entry_pct:.2f}% | Motivo: {exit_reason}"
             )
         except Exception as e:

@@ -592,3 +592,58 @@ class FundingHarvesterStrategy(BaseStrategy):
             f"<i>Modalità: {'DRY-RUN (Simulazione)' if self.dry_run else 'LIVE TRADING'}</i>"
         )
         return msg
+
+    def get_history_report(self, limit: int = 5) -> str:
+        """Format the latest closed trades from the CSV ledger."""
+        trades = self.ledger.get_recent_trades(limit=limit)
+        if not trades:
+            return "ℹ️ <b>Nessuna operazione chiusa registrata nel ledger finora.</b>"
+
+        lines = [
+            f"📜 <b>Ultime {len(trades)} Posizioni Chiuse (Ledger)</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━",
+        ]
+        for t in reversed(trades):
+            coin = t.get("coin", "UNKNOWN")
+            side = t.get("side", "SHORT")
+            side_badge = "🔴 SHORT" if side == "SHORT" else "🟢 LONG"
+            funding = float(t.get("funding_usd", 0.0))
+            duration = float(t.get("duration_hours", 0.0))
+            apy_in = float(t.get("apy_entry_pct", 0.0))
+            apy_out = float(t.get("apy_exit_pct", 0.0))
+            reason = t.get("exit_reason", "Chiusura")
+
+            lines.append(
+                f"• <b>{coin}</b> ({side_badge}) | ⏱️ {duration:.1f}h\n"
+                f"  💰 Funding: 🟢 <b>+${funding:.4f} USD</b>\n"
+                f"  📈 APY: {apy_in:.1f}% ➔ {apy_out:.1f}%\n"
+                f"  🏷️ <i>{reason}</i>\n"
+            )
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"🏆 <b>Totale Storico Incassato:</b> <b>+${self.total_funding_earned_usd:.4f} USD</b>")
+        return "\n".join(lines)
+
+    def get_watchlist_report(self, limit: int = 5) -> str:
+        """Format the top market opportunities currently available."""
+        opportunities = self.scan_opportunities()
+        if not opportunities:
+            return "ℹ️ <b>Nessuna opportunità sopra la soglia minima trovata al momento.</b>"
+
+        top_opps = opportunities[:limit]
+        lines = [
+            f"👀 <b>Top {len(top_opps)} Opportunità di Mercato (Watchlist)</b>",
+            "━━━━━━━━━━━━━━━━━━━━━━",
+        ]
+        for i, opp in enumerate(top_opps, 1):
+            side_badge = "🔴 SHORT" if opp.side == "SHORT" else "🟢 LONG"
+            oi_str = f"${opp.open_interest_usd/1_000_000:.1f}M" if opp.open_interest_usd >= 1_000_000 else f"${opp.open_interest_usd/1_000:.0f}K"
+            status_flag = " (IN POSIZIONE)" if opp.coin in self.active_positions else ""
+
+            lines.append(
+                f"<b>{i}. {opp.coin}</b> ({side_badge}){status_flag}\n"
+                f"   📈 APY: <b>{opp.annualized_apy_pct:.1f}%</b> ({opp.hourly_funding_rate * 100:.4f}%/h)\n"
+                f"   💵 Prezzo: ${opp.mark_price:,.2f} | OI: {oi_str}\n"
+            )
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"<i>Persistenza: {self.persistence_checks_required} tick | Min OI: ${self.min_open_interest_usd:,.0f}</i>")
+        return "\n".join(lines)

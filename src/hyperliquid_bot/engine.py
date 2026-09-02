@@ -85,6 +85,8 @@ class BotEngine:
         if self.telegram:
             self.telegram.register_command("/status", self._cmd_status)
             self.telegram.register_command("/balance", self._cmd_balance)
+            self.telegram.register_command("/history", self._cmd_history)
+            self.telegram.register_command("/watchlist", self._cmd_watchlist)
             self.telegram.register_command("/closeall", self._cmd_closeall)
             self.telegram.start_polling()
             self.telegram.send_startup(
@@ -209,6 +211,18 @@ class BotEngine:
             return self.strategy.get_balance_report()
         equity = self.strategy.get_equity() or 0.0
         return f"🏦 <b>Stato Saldo:</b>\n▫️ <b>Equity Totale:</b> ${equity:,.2f} USD"
+
+    def _cmd_history(self) -> str:
+        """Handle /history command from Telegram."""
+        if hasattr(self.strategy, "get_history_report"):
+            return self.strategy.get_history_report()
+        return "ℹ️ Nessuna cronologia disponibile per questa strategia."
+
+    def _cmd_watchlist(self) -> str:
+        """Handle /watchlist command from Telegram."""
+        if hasattr(self.strategy, "get_watchlist_report"):
+            return self.strategy.get_watchlist_report()
+        return "ℹ️ Nessuna watchlist disponibile per questa strategia."
 
     def _cmd_closeall(self) -> str:
         """Handle /closeall command from Telegram."""

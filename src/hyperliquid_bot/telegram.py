@@ -123,7 +123,9 @@ class TelegramNotifier:
             help_msg = (
                 "🤖 <b>Comandi Disponibili Hyperliquid Bot:</b>\n\n"
                 "📊 /status — Report guadagni e posizioni in tempo reale\n"
-                "🏦 /balance — Saldo conto, margine e capitale allocato\n"
+                "🏦 /balance — Saldo conto, margine ed equity complessiva\n"
+                "📜 /history — Storico ultime posizioni chiuse dal Ledger CSV\n"
+                "👀 /watchlist — Top opportunità di rendimento sul mercato\n"
                 "🛑 /closeall — <i>Chiusura di emergenza</i> di tutte le posizioni\n"
                 "ℹ️ /help — Mostra questo messaggio di aiuto"
             )

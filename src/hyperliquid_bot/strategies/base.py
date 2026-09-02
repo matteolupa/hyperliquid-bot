@@ -66,3 +66,11 @@ class BaseStrategy(ABC):
             f"▫️ <b>Equity Totale:</b> <b>${equity:,.2f} USD</b>\n"
             f"▫️ <b>Modalità:</b> {'DRY-RUN (Simulazione)' if self.dry_run else 'LIVE TRADING'}"
         )
+
+    def get_history_report(self, limit: int = 5) -> str:
+        """Return formatted history of recent closed trades."""
+        return "ℹ️ Nessuna cronologia disponibile per questa strategia."
+
+    def get_watchlist_report(self, limit: int = 5) -> str:
+        """Return formatted top market opportunities."""
+        return "ℹ️ Nessuna watchlist disponibile per questa strategia."

@@ -95,3 +95,15 @@ class FundingLedger:
             )
         except Exception as e:
             logger.error(f"Errore scrittura ledger per {coin}: {e}")
+
+    def get_recent_trades(self, limit: int = 5) -> list:
+        """Legge le ultime N operazioni registrate nel CSV."""
+        if not os.path.exists(self.filepath):
+            return []
+        try:
+            with open(self.filepath, "r", newline="", encoding="utf-8") as f:
+                reader = list(csv.DictReader(f))
+                return reader[-limit:] if reader else []
+        except Exception as e:
+            logger.error(f"Errore lettura ledger: {e}")
+            return []

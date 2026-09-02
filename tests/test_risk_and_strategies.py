@@ -690,6 +690,71 @@ class TestRiskAndStrategies(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_history_and_watchlist_reporting(self):
+        """Test comandi /history e /watchlist per consultare lo storico del ledger e le opportunità."""
+        import tempfile
+        import shutil
+        from hyperliquid_bot.persistence import StatePersistenceManager
+        from hyperliquid_bot.ledger import FundingLedger
+        from hyperliquid_bot.strategies.funding_harvester import FundingHarvesterStrategy
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            class MockInfo:
+                def meta_and_asset_ctxs(self):
+                    return [
+                        {"universe": [{"name": "ACE"}, {"name": "SOL"}]},
+                        [
+                            {"funding": "0.0005", "markPx": "1.5", "openInterest": "200000"},
+                            {"funding": "-0.0003", "markPx": "150.0", "openInterest": "500000"},
+                        ],
+                    ]
+
+            class MockClient:
+                info = MockInfo()
+
+            strategy = FundingHarvesterStrategy(
+                client=MockClient(),
+                allocation_per_position_usd=100.0,
+                dry_run=True,
+            )
+            strategy.persistence = StatePersistenceManager(data_dir=temp_dir, filename="test_hw.json")
+            strategy.ledger = FundingLedger(data_dir=temp_dir, dry_run=True)
+            strategy.on_start()
+
+            # 1. Test get_watchlist_report
+            wl_report = strategy.get_watchlist_report(limit=5)
+            self.assertIn("Top 2 Opportunità", wl_report)
+            self.assertIn("ACE", wl_report)
+            self.assertIn("SOL", wl_report)
+            self.assertIn("🔴 SHORT", wl_report)
+            self.assertIn("🟢 LONG", wl_report)
+
+            # 2. Test get_history_report with empty ledger
+            hist_empty = strategy.get_history_report()
+            self.assertIn("Nessuna operazione chiusa", hist_empty)
+
+            # 3. Add record to ledger and test get_history_report
+            strategy.ledger.record_close(
+                coin="ACE",
+                size=10.0,
+                entry_price=1.5,
+                entry_time=1000.0,
+                exit_time=4600.0,
+                apy_entry_pct=438.0,
+                apy_exit_pct=219.0,
+                funding_usd=0.0450,
+                exit_reason="Trailing APY Exit",
+                side="SHORT",
+            )
+            hist_report = strategy.get_history_report()
+            self.assertIn("Ultime 1 Posizioni Chiuse", hist_report)
+            self.assertIn("ACE", hist_report)
+            self.assertIn("+$0.0450 USD", hist_report)
+            self.assertIn("Trailing APY Exit", hist_report)
+        finally:
+            shutil.rmtree(temp_dir)
+
 
 if __name__ == "__main__":
     unittest.main()

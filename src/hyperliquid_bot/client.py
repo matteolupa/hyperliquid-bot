@@ -156,3 +156,67 @@ class HyperliquidClient:
             referral_discount_pct=referral_discount,
             builder_fee_bps=builder_fee_bps,
         )
+
+    def get_spot_perp_matches(self) -> Dict[str, Dict[str, Any]]:
+        """Map tokens that have both an active Perpetual and a Spot market against USDC.
+
+        Returns:
+            Dict mapping coin symbol to spot pair metadata.
+        """
+        matches = {}
+        try:
+            spot_meta, _ = self.info.spot_meta_and_asset_ctxs()
+            perp_meta = self.info.meta()
+            perp_names = {a["name"] for a in perp_meta.get("universe", [])}
+
+            tokens = spot_meta.get("tokens", [])
+            token_by_idx = {t["index"]: t for t in tokens}
+
+            for p in spot_meta.get("universe", []):
+                t_idxs = p.get("tokens", [])
+                # Quote token 0 is USDC on Hyperliquid L1
+                if len(t_idxs) == 2 and t_idxs[1] == 0:
+                    base_t = token_by_idx.get(t_idxs[0])
+                    if base_t:
+                        name = base_t.get("name")
+                        if name and name in perp_names:
+                            matches[name] = {
+                                "coin": name,
+                                "spot_pair_name": p.get("name"),
+                                "spot_pair_index": p.get("index"),
+                                "sz_decimals": base_t.get("szDecimals", 0),
+                                "is_canonical": base_t.get("isCanonical", False),
+                            }
+        except Exception as e:
+            pass
+        return matches
+
+    def order_market_open(
+        self,
+        name: str,
+        is_buy: bool,
+        size: float,
+        slippage: float = 0.05,
+    ) -> Any:
+        """Place a market open order for either Spot or Perp on Hyperliquid."""
+        if not self.exchange:
+            raise ValueError("Exchange client is not initialized (secret_key missing).")
+        return self.exchange.market_open(name=name, is_buy=is_buy, sz=size, slippage=slippage)
+
+    def order_market_close(
+        self,
+        name: str,
+        size: Optional[float] = None,
+        is_spot: bool = False,
+        slippage: float = 0.05,
+    ) -> Any:
+        """Close an active position (Spot sell or Perp buy/sell to cover)."""
+        if not self.exchange:
+            raise ValueError("Exchange client is not initialized (secret_key missing).")
+        if is_spot:
+            # Spot close = sell the held asset
+            if size is None or size <= 0:
+                raise ValueError("Size must be specified when closing a Spot position.")
+            return self.exchange.market_open(name=name, is_buy=False, sz=size, slippage=slippage)
+        else:
+            return self.exchange.market_close(coin=name, sz=size, slippage=slippage)

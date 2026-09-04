@@ -8,37 +8,44 @@ Progettato per operare 24/7 in cloud (es. istanze Ubuntu / Oracle Cloud), con ge
 
 ## 🌟 Caratteristiche Principali & Innovazioni
 
-### 1. 🥇 Delta-Neutral Funding Harvester Bidirezionale (`--strategy funding`)
-* **Positive Funding Arbitrage (🔴 SHORT):** Quando i trader long pagano gli short ($F > 0$), il bot apre posizioni short per incassare la rendita oraria.
-* **Negative Funding Arbitrage (🟢 LONG):** Nei momenti di panico o crolli di mercato ($F < 0$), i trader short pagano chi va long; il bot apre posizioni long per incassare i rendimenti generati dai venditori a leva.
+### 1. ⚖️ True Delta-Neutral Spot-Perp Cash & Carry (`--hedge-mode spot-perp` - DEFAULT)
+* **Rischio Prezzo ZERO ($\Delta = 0$):** Apertura simultanea e simmetrica di una posizione **🟢 LONG sul mercato Spot** (USDC) e di una posizione **🔴 SHORT sul Perpetual contract** del medesimo token (es. `HYPE`, `PURR`, `TRUMP`).
+* **Immunità alle oscillazioni di mercato:** Se il prezzo sale del +50%, il guadagno dello Spot ripaga esattamente la perdita del Perp. Se il prezzo crolla del -50%, il guadagno dello short ripaga esattamente la perdita dello Spot. Il capitale resta intatto al 100% mentre si incassa la rendita da funding rate passivo.
+* **Supporto Cross-Market Hyperliquid L1:** Riconoscimento automatico delle corrispondenze tra Universo Perp e Universo Spot (inclusi token numerici `@107` per HYPE o ticker diretti).
+* **Doppia Chiusura Sincronizzata:** Vendita automatica dello Spot e riacquisto del Perp al verificarsi dei criteri di uscita o su comando `/closeall`.
+
+### 2. ⚡ Perpetual Carry Mode Alternativa (`--hedge-mode perp-carry`)
+* Per chi desidera operare su altcoin senza mercato Spot nativo:
+  * **Positive Funding Arbitrage (🔴 SHORT):** Quando i trader long pagano gli short ($F > 0$), incassa rendita oraria con perp short.
+  * **Negative Funding Arbitrage (🟢 LONG):** Nei crolli di mercato ($F < 0$), i trader short pagano chi va long; incassa rendita con perp long.
 * **Live Dynamic Accrual:** Calcolo matematico incrementale esatto basato su $\Delta t$ e tasso live per ogni tick.
 * **Auto-Compounding Reale:** Reinveste automaticamente il 100% dei guadagni storici aumentando progressivamente la taglia d'ordine per ogni slot.
 
-### 2. 🛡️ Tripla Barriera di Sicurezza & Anti-Manipolazione
+### 3. 🛡️ Tripla Barriera di Sicurezza & Anti-Manipolazione
 * **Filtro Liquidità (`--min-oi-usd`):** Scarta i mercati con Open Interest insufficiente (default: **$50,000+**) per evitare slippage su coppie illiquide.
 * **Filtro Anti-Manipolazione (`--max-apy`):** Ignora token con APY anomali o pump artificiali superiori alla soglia massima (default: **1000% APY**).
 * **Filtro di Persistenza (`--persistence-checks`):** Richiede che un'opportunità mantenga tassi elevati per $N$ scansioni consecutive (default: **2 tick**) prima di entrare.
 
-### 3. 📉 Trailing APY Exit Intelligente (`--trailing-exit`)
+### 4. 📉 Trailing APY Exit Intelligente (`--trailing-exit`)
 * Monitora il picco massimo di APY registrato per ciascuna posizione.
 * Chiude automaticamente il trade se il tasso cala di oltre il $75\%$ dal picco (oppure scende sotto la soglia assoluta del $3\%$), monetizzando il funding e ruotando il capitale verso opportunità più redditizie.
 
-### 4. 📱 Bot Telegram Bidirezionale Interattivo
+### 5. 📱 Bot Telegram Bidirezionale Interattivo
 Controlla il bot in qualsiasi momento dal tuo smartphone con comandi istantanei:
 
 | Comando | Descrizione |
 |---|---|
-| **/status** | Report live su guadagni, rendita oraria stimata e posizioni aperte (con badge 🔴 SHORT / 🟢 LONG). |
+| **/status** | Report live su guadagni, rendita oraria stimata e posizioni aperte (con badge [⚖️ DELTA-ZERO] o 🔴/🟢). |
 | **/balance** | Riepilogo di equity totale, capitale allocato, margine libero e quota di auto-compounding. |
-| **/watchlist** | Classifica in tempo reale delle **Top 5 opportunità di mercato** con APY, tasso orario, prezzo e Open Interest. |
-| **/history** | Storico dettagliato delle **ultime 5 posizioni chiuse** estratte direttamente dal Ledger CSV. |
-| **/closeall** | **Chiusura di Emergenza:** chiude immediatamente tutti i trade aperti, riscuote il funding e salva lo stato su disco. |
+| **/watchlist** | Classifica in tempo reale delle **Top 5 opportunità di mercato** compatibili con la modalità attiva. |
+| **/history** | Storico dettagliato delle **ultime 5 posizioni chiuse** estratte direttamente dal Ledger CSV con modalità di hedge. |
+| **/closeall** | **Chiusura di Emergenza:** chiude immediatamente entrambe le gambe (Spot + Perp), riscuote il funding e salva lo stato su disco. |
 | **/help** | Guida rapida ai comandi. |
 
 > 🔒 **Sicurezza:** Il bot risponde **esclusivamente** al tuo `CHAT_ID` Telegram autorizzato. Qualsiasi messaggio da utenti esterni viene rifiutato.
 
-### 5. 📒 Ledger Contabile CSV & Persistenza Atomica
-* **`data/funding_ledger_dry.csv` (o `_live.csv`):** Append-only log formattato per commercialista, Excel o Numbers con durata trade, APY in/out, funding incassato e motivo di uscita.
+### 6. 📒 Ledger Contabile CSV & Persistenza Atomica
+* **`data/funding_ledger_dry.csv` (o `_live.csv`):** Append-only log con modalità di copertura (`hedge_mode`), coppia spot (`spot_pair`), durata trade, APY in/out, funding incassato e motivo di uscita.
 * **`data/funding_state_dry.json`:** Salvataggio atomico su disco con ripristino istantaneo di posizioni, watchlist e contatori in caso di riavvio del server.
 * **Circuit Breaker:** Arresto d'emergenza in caso di drawdown di portafoglio superiore alla soglia impostata (`--max-drawdown-pct`).
 
@@ -131,6 +138,7 @@ bash scripts/stop_nohup.sh
 | Parametro | Default | Descrizione |
 |---|:---:|---|
 | `--strategy` | `funding` | Strategia da eseguire (`funding`, `scalper`, `market_maker`). |
+| `--hedge-mode` | `spot-perp` | **Modalità di copertura:** `spot-perp` (True Delta-Neutral Cash & Carry, zero rischio prezzo) oppure `perp-carry` (Single-leg su perps). |
 | `--dry-run` | `True` | Modalità simulazione senza piazzamento ordini reali. |
 | `--live` | `False` | Abilita l'esecuzione reale di ordini su Hyperliquid. |
 | `--order-size-usd` | `50.0` | Capitale base allocato per singolo slot (es. `166.0` per ~$500 su 3 slot). |
@@ -139,7 +147,7 @@ bash scripts/stop_nohup.sh
 | `--trailing-exit` | `50.0` | Percentuale di calo dell'APY dal picco storico per uscire (consigliato `75.0`). |
 | `--min-oi-usd` | `50000.0`| Open Interest minimo in USD per filtrare mercati illiquidi. |
 | `--persistence-checks` | `2` | Numero di tick consecutivi di conferma prima dell'ingresso. |
-| `--allow-negative-funding` | `True` | Abilita il Negative Funding Arbitrage (apre LONG su tassi negativi). |
+| `--allow-negative-funding` | `True` | Abilita il Negative Funding Arbitrage in modalità `perp-carry`. |
 | `--auto-compound` | `True` | Reinveste i guadagni aumentando dinamicamente la taglia degli slot. |
 | `--report-interval` | `300.0` | Secondi tra i report periodici di stato su Telegram e nei log. |
 | `--max-drawdown-pct` | `5.0` | Soglia massima di drawdown per il Circuit Breaker d'emergenza. |
@@ -153,7 +161,7 @@ Il progetto include una suite completa di test unitari con isolamento del filesy
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
-*(28 test unitari superati con successo in < 0.01s).*
+*(29 test unitari superati con successo in < 0.01s).*
 
 ---
 

@@ -661,6 +661,7 @@ class TestRiskAndStrategies(unittest.TestCase):
                 allocation_per_position_usd=100.0,
                 persistence_checks_required=1,
                 allow_negative_funding=True,
+                hedge_mode="perp-carry",
                 dry_run=True,
             )
             strategy.persistence = StatePersistenceManager(data_dir=temp_dir, filename="test_neg.json")
@@ -716,6 +717,8 @@ class TestRiskAndStrategies(unittest.TestCase):
             strategy = FundingHarvesterStrategy(
                 client=MockClient(),
                 allocation_per_position_usd=100.0,
+                allow_negative_funding=True,
+                hedge_mode="perp-carry",
                 dry_run=True,
             )
             strategy.persistence = StatePersistenceManager(data_dir=temp_dir, filename="test_hw.json")
@@ -755,6 +758,132 @@ class TestRiskAndStrategies(unittest.TestCase):
         finally:
             shutil.rmtree(temp_dir)
 
+    def test_spot_perp_delta_neutral_strategy(self):
+        """Verify True Delta-Neutral Spot + Perp Cash & Carry:
+        - Only coins with matching Spot USDC markets are selected
+        - Dual-leg entry (Long Spot + Short Perp)
+        - Price swings (+50% or -50%) net out to exactly 0 PnL
+        - Funding yield accrues positively
+        - Live order execution triggers both spot and perp orders
+        """
+        import tempfile
+        import shutil
+        from hyperliquid_bot.persistence import StatePersistenceManager
+        from hyperliquid_bot.ledger import FundingLedger
+        from hyperliquid_bot.strategies.funding_harvester import FundingHarvesterStrategy
+
+        temp_dir = tempfile.mkdtemp()
+        try:
+            class MockInfo:
+                def meta_and_asset_ctxs(self):
+                    return [
+                        {"universe": [{"name": "HYPE"}, {"name": "MEME_NO_SPOT"}]},
+                        [
+                            {"funding": "0.0002", "markPx": "10.0", "openInterest": "50000"},  # APY ~175%
+                            {"funding": "0.0005", "markPx": "1.0", "openInterest": "100000"},  # APY ~438%, but no spot!
+                        ],
+                    ]
+
+            class MockClient:
+                def __init__(self):
+                    self.info = MockInfo()
+                    self.opened_orders = []
+                    self.closed_orders = []
+
+                def get_spot_perp_matches(self):
+                    return {
+                        "HYPE": {
+                            "spot_name": "HYPE",
+                            "spot_pair_name": "@107",
+                            "perp_name": "HYPE",
+                            "spot_token_index": 107,
+                        }
+                    }
+
+                def order_market_open(self, name: str, is_buy: bool, size: float, slippage: float = 0.01):
+                    self.opened_orders.append({"name": name, "is_buy": is_buy, "size": size})
+                    return {"status": "ok"}
+
+                def order_market_close(self, name: str, size: float, is_spot: bool = False, slippage: float = 0.01):
+                    self.closed_orders.append({"name": name, "size": size, "is_spot": is_spot})
+                    return {"status": "ok"}
+
+            mock_client = MockClient()
+
+            # 1. Test scan_opportunities with hedge_mode="spot-perp"
+            strategy = FundingHarvesterStrategy(
+                client=mock_client,
+                allocation_per_position_usd=100.0,
+                hedge_mode="spot-perp",
+                persistence_checks_required=1,
+                dry_run=False,  # Test live dispatch
+            )
+            strategy.persistence = StatePersistenceManager(data_dir=temp_dir, filename="test_dn_state.json")
+            strategy.ledger = FundingLedger(data_dir=temp_dir, dry_run=False)
+            strategy.on_start()
+
+            opps = strategy.scan_opportunities()
+            # MEME_NO_SPOT should be filtered out! Only HYPE remains
+            self.assertEqual(len(opps), 1)
+            self.assertEqual(opps[0].coin, "HYPE")
+            self.assertTrue(opps[0].is_spot_perp_match)
+            self.assertEqual(opps[0].spot_pair_name, "@107")
+
+            # 2. On tick -> Dual-leg entry
+            strategy.on_tick()
+            self.assertIn("HYPE", strategy.active_positions)
+            pos = strategy.active_positions["HYPE"]
+            self.assertEqual(pos.hedge_mode, "spot-perp")
+            self.assertEqual(pos.spot_pair_name, "@107")
+            self.assertEqual(pos.spot_size, 10.0)  # $100 / $10
+            self.assertEqual(pos.perp_size, 10.0)
+            self.assertEqual(pos.spot_entry_price, 10.0)
+            self.assertEqual(pos.perp_entry_price, 10.0)
+
+            # Check that live client received both SPOT buy and PERP short
+            self.assertEqual(len(mock_client.opened_orders), 2)
+            self.assertEqual(mock_client.opened_orders[0], {"name": "@107", "is_buy": True, "size": 10.0})
+            self.assertEqual(mock_client.opened_orders[1], {"name": "HYPE", "is_buy": False, "size": 10.0})
+
+            # 3. Mathematical proof of Delta = 0 under price volatility
+            # Case A: Price surges +50% ($10 -> $15)
+            spot_pnl_pump = (15.0 - pos.spot_entry_price) * pos.spot_size    # +$50.00
+            perp_pnl_pump = (pos.perp_entry_price - 15.0) * pos.perp_size    # -$50.00
+            net_delta_pnl_pump = spot_pnl_pump + perp_pnl_pump
+            self.assertEqual(net_delta_pnl_pump, 0.0, "Delta-neutral net PnL must be 0 on upside pump")
+
+            # Case B: Price dumps -50% ($10 -> $5)
+            spot_pnl_dump = (5.0 - pos.spot_entry_price) * pos.spot_size     # -$50.00
+            perp_pnl_dump = (pos.perp_entry_price - 5.0) * pos.perp_size     # +$50.00
+            net_delta_pnl_dump = spot_pnl_dump + perp_pnl_dump
+            self.assertEqual(net_delta_pnl_dump, 0.0, "Delta-neutral net PnL must be 0 on downside dump")
+
+            # 4. Format status report check
+            status_text = strategy.format_status_report()
+            self.assertIn("DELTA-ZERO", status_text)
+            self.assertIn("HYPE", status_text)
+            self.assertIn("🟢 Spot", status_text)
+            self.assertIn("🔴 Perp", status_text)
+
+            # 5. Close positions and verify dual-leg closure
+            strategy.close_all_positions(reason="Test Unit Exit")
+            self.assertEqual(len(strategy.active_positions), 0)
+
+            # Both legs must be closed
+            self.assertEqual(len(mock_client.closed_orders), 2)
+            self.assertEqual(mock_client.closed_orders[0], {"name": "@107", "size": 10.0, "is_spot": True})
+            self.assertEqual(mock_client.closed_orders[1], {"name": "HYPE", "size": 10.0, "is_spot": False})
+
+            # Check ledger record
+            history = strategy.ledger.get_recent_trades(limit=5)
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["coin"], "HYPE")
+            self.assertEqual(history[0]["hedge_mode"], "spot-perp")
+            self.assertEqual(history[0]["spot_pair"], "@107")
+        finally:
+            shutil.rmtree(temp_dir)
+
 
 if __name__ == "__main__":
     unittest.main()
+

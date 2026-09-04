@@ -121,6 +121,13 @@ def parse_args():
         help="Enable Negative Funding Arbitrage (harvest funding by going Long on negative funding rates)",
     )
     parser.add_argument(
+        "--hedge-mode",
+        type=str,
+        choices=["spot-perp", "perp-carry"],
+        default="spot-perp",
+        help="Hedging regime: 'spot-perp' (True Delta-Neutral: Spot Long + Perp Short, Rischio Prezzo ZERO) or 'perp-carry' (Single-leg Altcoin carry)",
+    )
+    parser.add_argument(
         "--spread-bps",
         type=float,
         default=8.0,
@@ -194,6 +201,7 @@ def main():
                 max_entry_apy_pct=args.max_apy,
                 trailing_exit_pct=args.trailing_exit,
                 allow_negative_funding=args.allow_negative_funding,
+                hedge_mode=args.hedge_mode,
             )
         elif args.strategy == "market_maker":
             interval = args.interval if args.interval is not None else 10.0

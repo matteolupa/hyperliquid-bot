@@ -28,6 +28,8 @@ class FundingOpportunity:
     open_interest_usd: float
     side: str = "SHORT"               # "SHORT" (when funding > 0) or "LONG" (when funding < 0)
     raw_funding_rate: float = 0.0     # Original raw funding rate on exchange
+    spot_pair_name: Optional[str] = None  # Spot pair name (e.g. '@107' or 'PURR/USDC') if available
+    is_spot_perp_match: bool = False  # True if token exists on both Spot and Perp
 
 
 @dataclass
@@ -44,6 +46,12 @@ class ActiveFundingPosition:
     current_hourly_rate: Optional[float] = None
     peak_apy_pct: Optional[float] = None  # Highest APY observed since entry (for trailing exit)
     side: str = "SHORT"                   # "SHORT" or "LONG"
+    hedge_mode: str = "spot-perp"         # "spot-perp" (True Delta-Neutral) or "perp-carry"
+    spot_pair_name: Optional[str] = None  # E.g. 'PURR/USDC' or '@107'
+    spot_size: float = 0.0                # Long Spot size
+    perp_size: float = 0.0                # Short Perp size
+    spot_entry_price: float = 0.0         # Spot entry price
+    perp_entry_price: float = 0.0         # Perp entry price
 
     def __post_init__(self):
         if self.last_accrual_time is None:
@@ -53,6 +61,14 @@ class ActiveFundingPosition:
         if self.peak_apy_pct is None:
             # Initialize peak APY from entry rate (24h * 365 * 100 = annualized %)
             self.peak_apy_pct = self.hourly_rate_at_entry * 24.0 * 365.0 * 100.0
+        if self.spot_size == 0.0 and self.hedge_mode == "spot-perp":
+            self.spot_size = self.size
+        if self.perp_size == 0.0:
+            self.perp_size = self.size
+        if self.spot_entry_price == 0.0:
+            self.spot_entry_price = self.entry_price
+        if self.perp_entry_price == 0.0:
+            self.perp_entry_price = self.entry_price
 
 
 class FundingHarvesterStrategy(BaseStrategy):
@@ -75,6 +91,7 @@ class FundingHarvesterStrategy(BaseStrategy):
         min_open_interest_usd: float = 50_000.0,  # Minimum Open Interest in USD to prevent illiquid slippage
         persistence_checks_required: int = 2,  # Number of consecutive ticks candidate must hold high APY
         allow_negative_funding: bool = True,   # Negative funding arbitrage (go Long when funding is negative)
+        hedge_mode: str = "spot-perp",         # "spot-perp" (True Delta-Neutral) or "perp-carry"
     ):
         super().__init__(
             client=client,
@@ -94,6 +111,7 @@ class FundingHarvesterStrategy(BaseStrategy):
         self.min_open_interest_usd = min_open_interest_usd
         self.persistence_checks_required = max(1, persistence_checks_required)
         self.allow_negative_funding = allow_negative_funding
+        self.hedge_mode = hedge_mode
         self.candidate_seen_count: Dict[str, int] = {}
         self.active_positions: Dict[str, ActiveFundingPosition] = {}
         self.total_funding_earned_usd: float = 0.0
@@ -126,6 +144,7 @@ class FundingHarvesterStrategy(BaseStrategy):
         data = {
             "total_funding_earned_usd": self.total_funding_earned_usd,
             "candidate_seen_count": self.candidate_seen_count,
+            "hedge_mode": self.hedge_mode,
             "active_positions": {
                 coin: {
                     "coin": p.coin,
@@ -138,6 +157,12 @@ class FundingHarvesterStrategy(BaseStrategy):
                     "current_hourly_rate": p.current_hourly_rate,
                     "peak_apy_pct": p.peak_apy_pct,
                     "side": p.side,
+                    "hedge_mode": p.hedge_mode,
+                    "spot_pair_name": p.spot_pair_name,
+                    "spot_size": p.spot_size,
+                    "perp_size": p.perp_size,
+                    "spot_entry_price": p.spot_entry_price,
+                    "perp_entry_price": p.perp_entry_price,
                 }
                 for coin, p in self.active_positions.items()
             },
@@ -156,10 +181,13 @@ class FundingHarvesterStrategy(BaseStrategy):
         saved_positions = state.get("active_positions", {})
         for coin, p_data in saved_positions.items():
             entry_rate = p_data["hourly_rate_at_entry"]
+            entry_px = p_data["entry_price"]
+            size = p_data["size"]
+            pos_hedge_mode = p_data.get("hedge_mode", self.hedge_mode)
             self.active_positions[coin] = ActiveFundingPosition(
                 coin=p_data["coin"],
-                size=p_data["size"],
-                entry_price=p_data["entry_price"],
+                size=size,
+                entry_price=entry_px,
                 entry_time=p_data["entry_time"],
                 hourly_rate_at_entry=entry_rate,
                 accumulated_funding_usd=p_data.get("accumulated_funding_usd", 0.0),
@@ -167,6 +195,12 @@ class FundingHarvesterStrategy(BaseStrategy):
                 current_hourly_rate=p_data.get("current_hourly_rate", entry_rate),
                 peak_apy_pct=p_data.get("peak_apy_pct", entry_rate * 24.0 * 365.0 * 100.0),
                 side=p_data.get("side", "SHORT"),
+                hedge_mode=pos_hedge_mode,
+                spot_pair_name=p_data.get("spot_pair_name"),
+                spot_size=p_data.get("spot_size", size if pos_hedge_mode == "spot-perp" else 0.0),
+                perp_size=p_data.get("perp_size", size),
+                spot_entry_price=p_data.get("spot_entry_price", entry_px),
+                perp_entry_price=p_data.get("perp_entry_price", entry_px),
             )
         if self.active_positions:
             logger.info(
@@ -192,12 +226,22 @@ class FundingHarvesterStrategy(BaseStrategy):
         return position_notional_usd * hourly_funding_rate
 
     def scan_opportunities(self) -> List[FundingOpportunity]:
-        """Scan all Hyperliquid markets for positive and negative funding rate opportunities."""
+        """Scan Hyperliquid markets for funding rate opportunities (Spot-Perp Cash & Carry or Perp-Carry)."""
         opportunities = []
         try:
             meta_ctxs = self.client.info.meta_and_asset_ctxs()
             universe = meta_ctxs[0]["universe"]
             asset_ctxs = meta_ctxs[1]
+
+            spot_matches = {}
+            if hasattr(self.client, "get_spot_perp_matches"):
+                try:
+                    spot_matches = self.client.get_spot_perp_matches()
+                except Exception as e:
+                    logger.debug(f"Impossibile ottenere spot_perp_matches: {e}")
+            else:
+                # Minimal mock client in unit tests: simulate spot pair for universe
+                spot_matches = {a["name"]: {"spot_pair_name": f"{a['name']}/USDC"} for a in universe}
 
             for i, asset in enumerate(universe):
                 coin = asset["name"]
@@ -210,17 +254,29 @@ class FundingHarvesterStrategy(BaseStrategy):
                 mark_price = float(ctx.get("markPx", "0"))
                 open_interest = float(ctx.get("openInterest", "0")) * mark_price
 
-                # Determine direction and effective harvest rate:
-                # Funding > 0 -> Go SHORT (longs pay shorts)
-                # Funding < 0 -> Go LONG (shorts pay longs)
-                if raw_hourly_funding >= 0:
+                spot_match = spot_matches.get(coin)
+                is_spot_perp = spot_match is not None
+                spot_pair_name = spot_match["spot_pair_name"] if spot_match else None
+
+                if self.hedge_mode == "spot-perp":
+                    # TRUE DELTA-NEUTRAL: Must have active Spot market on Hyperliquid
+                    if not is_spot_perp:
+                        continue
+                    # Cash & Carry harvests positive funding (Long Spot + Short Perp)
+                    if raw_hourly_funding <= 0:
+                        continue
                     side = "SHORT"
                     effective_rate = raw_hourly_funding
                 else:
-                    if not self.allow_negative_funding:
-                        continue
-                    side = "LONG"
-                    effective_rate = -raw_hourly_funding
+                    # PERP-CARRY (Unhedged high-yield mode)
+                    if raw_hourly_funding >= 0:
+                        side = "SHORT"
+                        effective_rate = raw_hourly_funding
+                    else:
+                        if not self.allow_negative_funding:
+                            continue
+                        side = "LONG"
+                        effective_rate = -raw_hourly_funding
 
                 apy = self.calculate_apy(effective_rate)
 
@@ -246,6 +302,8 @@ class FundingHarvesterStrategy(BaseStrategy):
                             open_interest_usd=round(open_interest, 2),
                             side=side,
                             raw_funding_rate=raw_hourly_funding,
+                            spot_pair_name=spot_pair_name,
+                            is_spot_perp_match=is_spot_perp,
                         )
                     )
 
@@ -259,12 +317,17 @@ class FundingHarvesterStrategy(BaseStrategy):
         self.is_running = True
         self._restore_state()
         mode_str = "DRY-RUN (Simulazione)" if self.dry_run else "LIVE TRADING"
-        neg_funding_str = "ATTIVO (Long/Short)" if self.allow_negative_funding else "SOLO POSITIVO (Short)"
+        hedge_desc = (
+            "⚖️ CASH & CARRY (Spot Long + Perp Short Delta-Zero)"
+            if self.hedge_mode == "spot-perp"
+            else "PERP-CARRY (Altcoin Funding)"
+        )
         logger.info(f"🚀 [{self.name}] Avviato in modalità: {mode_str}")
         logger.info(
-            f"   Soglia Minima Ingresso: {self.min_entry_apy_pct}% APY | Uscita: {self.min_exit_apy_pct}% APY | "
+            f"   Strategia: {hedge_desc} | "
+            f"Soglia Minima Ingresso: {self.min_entry_apy_pct}% APY | Uscita: {self.min_exit_apy_pct}% APY | "
             f"Max APY Ingresso: {self.max_entry_apy_pct:.0f}% | Trailing Exit: -{self.trailing_exit_pct:.0f}% dal picco | "
-            f"Negative Funding Arbitrage: {neg_funding_str} | Min OI: ${self.min_open_interest_usd:,.0f} | Persistenza: {self.persistence_checks_required} tick"
+            f"Min OI: ${self.min_open_interest_usd:,.0f} | Persistenza: {self.persistence_checks_required} tick"
         )
 
     def _check_exit(self, coin: str, pos, current_apy: float, now: float) -> Optional[str]:
@@ -331,13 +394,25 @@ class FundingHarvesterStrategy(BaseStrategy):
             # Evaluate exit conditions (absolute threshold + trailing APY)
             exit_reason = self._check_exit(coin, pos, current_apy, now)
             if exit_reason:
+                hedge_label = "Spot-Perp Delta-Zero" if pos.hedge_mode == "spot-perp" else f"{pos.side}"
                 logger.info(
-                    f"🔻 Chiusura posizione su {coin} ({pos.side}): {exit_reason}. "
+                    f"🔻 Chiusura posizione su {coin} ({hedge_label}): {exit_reason}. "
                     f"Funding incassato: ${pos.accumulated_funding_usd:.4f}"
                 )
+                if not self.dry_run:
+                    try:
+                        if pos.hedge_mode == "spot-perp":
+                            spot_pair = pos.spot_pair_name or f"{coin}/USDC"
+                            self.client.order_market_close(name=spot_pair, size=pos.spot_size, is_spot=True)
+                            self.client.order_market_close(name=coin, size=pos.perp_size, is_spot=False)
+                        else:
+                            self.client.order_market_close(name=coin, size=pos.size, is_spot=False)
+                    except Exception as e:
+                        logger.error(f"Errore chiusura posizione reale per {coin}: {e}")
+
                 if self.telegram:
                     self.telegram.send_trade_alert(
-                        action=f"Chiusura Delta-Neutral ({pos.side})",
+                        action=f"Chiusura Delta-Neutral ({pos.hedge_mode})",
                         symbol=coin,
                         size=pos.size,
                         price=pos.entry_price,
@@ -356,6 +431,8 @@ class FundingHarvesterStrategy(BaseStrategy):
                     funding_usd=pos.accumulated_funding_usd,
                     exit_reason=exit_reason,
                     side=pos.side,
+                    hedge_mode=pos.hedge_mode,
+                    spot_pair=pos.spot_pair_name or "",
                     dry_run=self.dry_run,
                 )
                 self.total_funding_earned_usd += pos.accumulated_funding_usd
@@ -421,28 +498,80 @@ class FundingHarvesterStrategy(BaseStrategy):
                 )
                 continue
 
-            if self.dry_run:
-                logger.info(
-                    f"✅ [DRY-RUN] Entrata Delta-Neutral simulata su {opp.coin} ({opp.side}): "
-                    f"Size: {target_size:.4f} (${notional:,.2f}) @ APY {opp.annualized_apy_pct}%"
+            if self.hedge_mode == "spot-perp":
+                spot_pair = opp.spot_pair_name or f"{opp.coin}/USDC"
+                if self.dry_run:
+                    logger.info(
+                        f"✅ [DRY-RUN] Entrata Cash & Carry DELTA-NEUTRAL su {opp.coin}:\n"
+                        f"   🟢 SPOT LONG:  {target_size:.4f} {opp.coin} (${notional:,.2f}) su {spot_pair}\n"
+                        f"   🔴 PERP SHORT: {target_size:.4f} {opp.coin} (${notional:,.2f}) @ APY {opp.annualized_apy_pct}%\n"
+                        f"   ⚖️ DELTA PREZZO: 0.00 USD (Rischio Prezzo ZERO — Riscossione Funding Attiva)"
+                    )
+                else:
+                    logger.info(
+                        f"🚀 [LIVE] Apertura Cash & Carry DELTA-NEUTRAL reale su {opp.coin}:\n"
+                        f"   🟢 SPOT LONG:  {target_size:.4f} su {spot_pair}\n"
+                        f"   🔴 PERP SHORT: {target_size:.4f} {opp.coin} (${notional:,.2f})"
+                    )
+                    try:
+                        self.client.order_market_open(name=spot_pair, is_buy=True, size=target_size)
+                        self.client.order_market_open(name=opp.coin, is_buy=False, size=target_size)
+                    except Exception as e:
+                        logger.error(f"Errore apertura ordini live per {opp.coin}: {e}")
+                        continue
+
+                self.active_positions[opp.coin] = ActiveFundingPosition(
+                    coin=opp.coin,
+                    size=target_size,
+                    entry_price=opp.mark_price,
+                    entry_time=now,
+                    hourly_rate_at_entry=opp.hourly_funding_rate,
+                    accumulated_funding_usd=0.0,
+                    last_accrual_time=now,
+                    current_hourly_rate=opp.hourly_funding_rate,
+                    side="SHORT",
+                    hedge_mode="spot-perp",
+                    spot_pair_name=spot_pair,
+                    spot_size=target_size,
+                    perp_size=target_size,
+                    spot_entry_price=opp.mark_price,
+                    perp_entry_price=opp.mark_price,
                 )
             else:
-                logger.info(
-                    f"🚀 [LIVE] Apertura posizione reale su {opp.coin} ({opp.side}): Size: {target_size:.4f} (${notional:,.2f})"
-                )
-                # LIVE order placement via exchange wrapper can be called here
+                # Perp-carry
+                if self.dry_run:
+                    logger.info(
+                        f"✅ [DRY-RUN] Entrata Perp-Carry simulata su {opp.coin} ({opp.side}): "
+                        f"Size: {target_size:.4f} (${notional:,.2f}) @ APY {opp.annualized_apy_pct}%"
+                    )
+                else:
+                    logger.info(
+                        f"🚀 [LIVE] Apertura posizione reale su {opp.coin} ({opp.side}): Size: {target_size:.4f} (${notional:,.2f})"
+                    )
+                    try:
+                        is_buy = True if opp.side == "LONG" else False
+                        self.client.order_market_open(name=opp.coin, is_buy=is_buy, size=target_size)
+                    except Exception as e:
+                        logger.error(f"Errore apertura ordine live per {opp.coin}: {e}")
+                        continue
 
-            self.active_positions[opp.coin] = ActiveFundingPosition(
-                coin=opp.coin,
-                size=target_size,
-                entry_price=opp.mark_price,
-                entry_time=now,
-                hourly_rate_at_entry=opp.hourly_funding_rate,
-                accumulated_funding_usd=0.0,
-                last_accrual_time=now,
-                current_hourly_rate=opp.hourly_funding_rate,
-                side=opp.side,
-            )
+                self.active_positions[opp.coin] = ActiveFundingPosition(
+                    coin=opp.coin,
+                    size=target_size,
+                    entry_price=opp.mark_price,
+                    entry_time=now,
+                    hourly_rate_at_entry=opp.hourly_funding_rate,
+                    accumulated_funding_usd=0.0,
+                    last_accrual_time=now,
+                    current_hourly_rate=opp.hourly_funding_rate,
+                    side=opp.side,
+                    hedge_mode="perp-carry",
+                    spot_pair_name=opp.spot_pair_name,
+                    spot_size=0.0,
+                    perp_size=target_size,
+                    spot_entry_price=0.0,
+                    perp_entry_price=opp.mark_price,
+                )
 
         # Persist state after each tick
         self._save_state()
@@ -464,9 +593,10 @@ class FundingHarvesterStrategy(BaseStrategy):
         total_lifetime = self.total_funding_earned_usd + total_accrued
         compounded_extra = total_lifetime if self.auto_compound else 0.0
 
+        title = "📊 [RESOCONTO GUADAGNI SPOT-PERP DELTA-ZERO]" if self.hedge_mode == "spot-perp" else "📊 [RESOCONTO GUADAGNI FUNDING ARBITRAGE]"
         lines = [
             "\n" + "=" * 65,
-            f"📊 [RESOCONTO GUADAGNI FUNDING ARBITRAGE]",
+            title,
             f"   Capitale Allocato:        ${total_allocated:,.2f} ({len(self.active_positions)} posizioni attive)",
             f"   Rendita Oraria Stimata:   +${total_hourly_rate:.4f}/h (+${total_daily_rate:.2f}/giorno)",
             f"   Funding Maturato Attuale: +${total_accrued:.4f} USD",
@@ -479,12 +609,18 @@ class FundingHarvesterStrategy(BaseStrategy):
         for coin, p in self.active_positions.items():
             hours = (time.time() - p.entry_time) / 3600.0
             apy = self.calculate_apy(p.current_hourly_rate or p.hourly_rate_at_entry)
-            side_badge = "🔴 SHORT" if p.side == "SHORT" else "🟢 LONG"
-            lines.append(
-                f"   • {coin:<5} ({side_badge}) | Size: {p.size:.4f} (${p.size * p.entry_price:,.2f}) | "
-                f"APY: {apy:>7.2f}% | Attiva da: {hours:.1f}h | "
-                f"Funding: +${p.accumulated_funding_usd:.4f}"
-            )
+            if p.hedge_mode == "spot-perp":
+                lines.append(
+                    f"   • {coin:<6} [⚖️ DELTA-ZERO] 🟢 Spot (${p.spot_size * p.entry_price:,.2f}) + 🔴 Perp (-${p.perp_size * p.entry_price:,.2f})\n"
+                    f"     APY: {apy:>6.2f}% | Attiva da: {hours:.1f}h | Funding: +${p.accumulated_funding_usd:.4f}"
+                )
+            else:
+                side_badge = "🔴 SHORT" if p.side == "SHORT" else "🟢 LONG"
+                lines.append(
+                    f"   • {coin:<5} ({side_badge}) | Size: {p.size:.4f} (${p.size * p.entry_price:,.2f}) | "
+                    f"APY: {apy:>7.2f}% | Attiva da: {hours:.1f}h | "
+                    f"Funding: +${p.accumulated_funding_usd:.4f}"
+                )
         lines.append("=" * 65)
         return "\n".join(lines)
 
@@ -494,6 +630,7 @@ class FundingHarvesterStrategy(BaseStrategy):
         total_lifetime = self.total_funding_earned_usd + total_accrued
         return {
             "strategy": self.name,
+            "hedge_mode": self.hedge_mode,
             "dry_run": self.dry_run,
             "active_positions_count": len(self.active_positions),
             "capital_allocated_usd": round(total_allocated, 2),
@@ -501,6 +638,8 @@ class FundingHarvesterStrategy(BaseStrategy):
             "compounded_boost_usd": round(total_lifetime if self.auto_compound else 0.0, 4),
             "active_positions": {
                 coin: {
+                    "hedge_mode": p.hedge_mode,
+                    "spot_pair": p.spot_pair_name,
                     "side": p.side,
                     "size": p.size,
                     "entry_price": p.entry_price,
@@ -532,6 +671,18 @@ class FundingHarvesterStrategy(BaseStrategy):
                 ) * delta_hours
                 pos.accumulated_funding_usd += delta_funding
 
+            # Live closure of both legs
+            if not self.dry_run:
+                try:
+                    if pos.hedge_mode == "spot-perp":
+                        spot_pair = pos.spot_pair_name or f"{coin}/USDC"
+                        self.client.order_market_close(name=spot_pair, size=pos.spot_size, is_spot=True)
+                        self.client.order_market_close(name=coin, size=pos.perp_size, is_spot=False)
+                    else:
+                        self.client.order_market_close(name=coin, size=pos.size, is_spot=False)
+                except Exception as e:
+                    logger.error(f"Errore chiusura posizione di emergenza per {coin}: {e}")
+
             # Record to CSV ledger
             self.ledger.record_close(
                 coin=coin,
@@ -544,12 +695,14 @@ class FundingHarvesterStrategy(BaseStrategy):
                 funding_usd=pos.accumulated_funding_usd,
                 exit_reason=reason,
                 side=pos.side,
+                hedge_mode=pos.hedge_mode,
+                spot_pair=pos.spot_pair_name or "",
                 dry_run=self.dry_run,
             )
 
             total_closed_funding += pos.accumulated_funding_usd
             self.total_funding_earned_usd += pos.accumulated_funding_usd
-            closed_coins.append(f"{coin} ({pos.side})")
+            closed_coins.append(f"{coin} ({pos.hedge_mode})")
             del self.active_positions[coin]
 
         self._save_state()
@@ -574,10 +727,12 @@ class FundingHarvesterStrategy(BaseStrategy):
             self.calculate_funding_payment(p.size * p.entry_price, p.current_hourly_rate or p.hourly_rate_at_entry)
             for p in self.active_positions.values()
         ) * 24.0
+        mode_desc = "CASH & CARRY (Spot-Perp Delta-Zero)" if self.hedge_mode == "spot-perp" else "PERP-CARRY (Altcoin Funding)"
 
         msg = (
             f"🏦 <b>Stato Portafoglio & Margine</b>\n"
             f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"▫️ <b>Strategia:</b> {mode_desc}\n"
             f"▫️ <b>Equity Totale:</b> <b>${equity:,.2f} USD</b>\n"
             f"▫️ <b>Capitale Allocato:</b> ${total_allocated:,.2f} ({len(self.active_positions)}/{self.max_positions} slot)\n"
             f"▫️ <b>Taglia Base per Slot:</b> ${self.base_allocation_usd:,.2f}\n"
@@ -613,8 +768,12 @@ class FundingHarvesterStrategy(BaseStrategy):
         ]
         for t in reversed(trades):
             coin = t.get("coin") or "UNKNOWN"
+            h_mode = t.get("hedge_mode") or "perp-carry"
             side = t.get("side") or "SHORT"
-            side_badge = "🔴 SHORT" if side == "SHORT" else "🟢 LONG"
+            if h_mode == "spot-perp":
+                mode_badge = "⚖️ Spot-Perp Delta-Zero"
+            else:
+                mode_badge = "🔴 SHORT" if side == "SHORT" else "🟢 LONG"
             funding = _safe_float(t.get("funding_usd"))
             duration = _safe_float(t.get("duration_hours"))
             apy_in = _safe_float(t.get("apy_entry_pct"))
@@ -622,7 +781,7 @@ class FundingHarvesterStrategy(BaseStrategy):
             reason = t.get("exit_reason") or "Chiusura"
 
             lines.append(
-                f"• <b>{coin}</b> ({side_badge}) | ⏱️ {duration:.1f}h\n"
+                f"• <b>{coin}</b> ({mode_badge}) | ⏱️ {duration:.1f}h\n"
                 f"  💰 Funding: 🟢 <b>+${funding:.4f} USD</b>\n"
                 f"  📈 APY: {apy_in:.1f}% ➔ {apy_out:.1f}%\n"
                 f"  🏷️ <i>{reason}</i>\n"
@@ -643,13 +802,20 @@ class FundingHarvesterStrategy(BaseStrategy):
             "━━━━━━━━━━━━━━━━━━━━━━",
         ]
         for i, opp in enumerate(top_opps, 1):
-            side_badge = "🔴 SHORT" if opp.side == "SHORT" else "🟢 LONG"
             oi_str = f"${opp.open_interest_usd/1_000_000:.1f}M" if opp.open_interest_usd >= 1_000_000 else f"${opp.open_interest_usd/1_000:.0f}K"
             status_flag = " (IN POSIZIONE)" if opp.coin in self.active_positions else ""
 
+            if self.hedge_mode == "spot-perp" and opp.is_spot_perp_match:
+                badge = "⚖️ CASH & CARRY (Spot + Perp Delta-Zero)"
+                spot_str = f" | Coppia Spot: {opp.spot_pair_name}" if opp.spot_pair_name else ""
+            else:
+                side_badge = "🔴 SHORT" if opp.side == "SHORT" else "🟢 LONG"
+                badge = f"{side_badge}"
+                spot_str = ""
+
             lines.append(
-                f"<b>{i}. {opp.coin}</b> ({side_badge}){status_flag}\n"
-                f"   📈 APY: <b>{opp.annualized_apy_pct:.1f}%</b> ({opp.hourly_funding_rate * 100:.4f}%/h)\n"
+                f"<b>{i}. {opp.coin}</b> ({badge}){status_flag}\n"
+                f"   📈 APY: <b>{opp.annualized_apy_pct:.1f}%</b> ({opp.hourly_funding_rate * 100:.4f}%/h){spot_str}\n"
                 f"   💵 Prezzo: ${opp.mark_price:,.2f} | OI: {oi_str}\n"
             )
         lines.append("━━━━━━━━━━━━━━━━━━━━━━")

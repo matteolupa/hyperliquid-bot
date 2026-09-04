@@ -15,7 +15,9 @@ class FundingLedger:
     HEADERS = [
         "data_chiusura",
         "coin",
+        "hedge_mode",
         "side",
+        "spot_pair",
         "size",
         "entry_price",
         "notional_usd",
@@ -37,7 +39,7 @@ class FundingLedger:
         self._ensure_header()
 
     def _ensure_header(self) -> None:
-        """Crea il file CSV con intestazioni se non esiste o migra vecchi file senza 'side'."""
+        """Crea il file CSV con intestazioni se non esiste o migra vecchi file con nuovi campi."""
         if not os.path.exists(self.filepath):
             try:
                 with open(self.filepath, "w", newline="", encoding="utf-8") as f:
@@ -47,21 +49,25 @@ class FundingLedger:
             except Exception as e:
                 logger.error(f"Errore creazione ledger: {e}")
         else:
-            # Check if existing CSV has old headers (missing 'side')
+            # Check if existing CSV has old headers (missing 'hedge_mode' or 'side')
             try:
                 with open(self.filepath, "r", newline="", encoding="utf-8") as f:
                     first_line = f.readline()
-                if first_line and "side" not in first_line:
+                if first_line and ("hedge_mode" not in first_line or "side" not in first_line):
                     with open(self.filepath, "r", newline="", encoding="utf-8") as f:
                         old_rows = list(csv.DictReader(f))
                     with open(self.filepath, "w", newline="", encoding="utf-8") as f:
                         writer = csv.DictWriter(f, fieldnames=self.HEADERS, extrasaction="ignore")
                         writer.writeheader()
                         for row in old_rows:
+                            if "hedge_mode" not in row or not row["hedge_mode"]:
+                                row["hedge_mode"] = "perp-carry"
                             if "side" not in row or not row["side"]:
                                 row["side"] = "SHORT"
+                            if "spot_pair" not in row:
+                                row["spot_pair"] = ""
                             writer.writerow(row)
-                    logger.info(f"📒 Ledger aggiornato con successo con la colonna 'side': {self.filepath}")
+                    logger.info(f"📒 Ledger aggiornato con successo con le nuove colonne: {self.filepath}")
             except Exception as e:
                 logger.warning(f"Controllo header ledger: {e}")
 
@@ -77,6 +83,8 @@ class FundingLedger:
         funding_usd: float,
         exit_reason: str,
         side: str = "SHORT",
+        hedge_mode: str = "spot-perp",
+        spot_pair: str = "",
         dry_run: bool = True,
     ) -> None:
         """Registra una posizione chiusa nel ledger CSV."""
@@ -89,7 +97,9 @@ class FundingLedger:
         row = {
             "data_chiusura": date_str,
             "coin": coin,
+            "hedge_mode": hedge_mode,
             "side": side,
+            "spot_pair": spot_pair,
             "size": round(size, 6),
             "entry_price": round(entry_price, 6),
             "notional_usd": round(notional_usd, 2),
@@ -105,10 +115,10 @@ class FundingLedger:
 
         try:
             with open(self.filepath, "a", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=self.HEADERS)
+                writer = csv.DictWriter(f, fieldnames=self.HEADERS, extrasaction="ignore")
                 writer.writerow(row)
             logger.info(
-                f"📒 [LEDGER] {coin} ({side}) chiuso: +${funding_usd:.4f} USD | "
+                f"📒 [LEDGER] {coin} ({hedge_mode} | {side}) chiuso: +${funding_usd:.4f} USD | "
                 f"{duration_hours:.1f}h | APY entrata: {apy_entry_pct:.2f}% | Motivo: {exit_reason}"
             )
         except Exception as e:

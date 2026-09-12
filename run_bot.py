@@ -139,6 +139,36 @@ def parse_args():
         default=5.0,
         help="Emergency Circuit Breaker max drawdown percentage (e.g. 5.0 for 5%%)",
     )
+    parser.add_argument(
+        "--rotation-min-spread",
+        type=float,
+        default=30.0,
+        help="Minimum APY spread %% between best candidate and worst position to trigger smart rotation (default: 30%%)",
+    )
+    parser.add_argument(
+        "--rotation-breakeven-hours",
+        type=float,
+        default=4.0,
+        help="Maximum hours to recoup round-trip fees before allowing smart rotation (default: 4.0h)",
+    )
+    parser.add_argument(
+        "--enable-trend-detection",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable Funding Rate Trend Detection & Prediction (default: True)",
+    )
+    parser.add_argument(
+        "--enable-cross-exchange",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable Multi-Exchange Funding Spread Monitor (Binance, Bybit, dYdX) (default: True)",
+    )
+    parser.add_argument(
+        "--enable-basis-monitor",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable Spot vs Perp Basis Trade Monitor (default: True)",
+    )
 
     return parser.parse_args()
 
@@ -202,6 +232,11 @@ def main():
                 trailing_exit_pct=args.trailing_exit,
                 allow_negative_funding=args.allow_negative_funding,
                 hedge_mode=args.hedge_mode,
+                rotation_min_spread_pct=args.rotation_min_spread,
+                rotation_max_breakeven_hours=args.rotation_breakeven_hours,
+                enable_trend_detection=args.enable_trend_detection,
+                enable_cross_exchange=args.enable_cross_exchange,
+                enable_basis_monitor=args.enable_basis_monitor,
             )
         elif args.strategy == "market_maker":
             interval = args.interval if args.interval is not None else 10.0

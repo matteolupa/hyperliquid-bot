@@ -30,6 +30,13 @@ class FundingOpportunity:
     raw_funding_rate: float = 0.0     # Original raw funding rate on exchange
     spot_pair_name: Optional[str] = None  # Spot pair name (e.g. '@107' or 'PURR/USDC') if available
     is_spot_perp_match: bool = False  # True if token exists on both Spot and Perp
+    # Advanced analytics fields (populated when modules are enabled)
+    funding_trend: Optional[str] = None       # "RISING", "STABLE", "FALLING"
+    trend_confidence: float = 0.0             # 0.0–1.0
+    predicted_apy_4h: Optional[float] = None  # Projected APY for next 4h
+    basis_bps: Optional[float] = None         # Spot-Perp basis in bps
+    basis_direction: Optional[str] = None     # "PREMIUM", "DISCOUNT", "FLAT"
+    composite_score: float = 0.0              # Weighted composite score (0–100)
 
 
 @dataclass
@@ -92,6 +99,12 @@ class FundingHarvesterStrategy(BaseStrategy):
         persistence_checks_required: int = 2,  # Number of consecutive ticks candidate must hold high APY
         allow_negative_funding: bool = True,   # Negative funding arbitrage (go Long when funding is negative)
         hedge_mode: str = "spot-perp",         # "spot-perp" (True Delta-Neutral) or "perp-carry"
+        # Advanced feature parameters
+        rotation_min_spread_pct: float = 30.0,    # Min APY gap to trigger rotation
+        rotation_max_breakeven_hours: float = 4.0, # Max hours to recoup rotation fees
+        enable_trend_detection: bool = True,       # Enable FundingAnalytics
+        enable_cross_exchange: bool = True,        # Enable MultiExchangeMonitor
+        enable_basis_monitor: bool = True,         # Enable BasisMonitor
     ):
         super().__init__(
             client=client,
@@ -112,6 +125,8 @@ class FundingHarvesterStrategy(BaseStrategy):
         self.persistence_checks_required = max(1, persistence_checks_required)
         self.allow_negative_funding = allow_negative_funding
         self.hedge_mode = hedge_mode
+        self.rotation_min_spread_pct = rotation_min_spread_pct
+        self.rotation_max_breakeven_hours = rotation_max_breakeven_hours
         self.candidate_seen_count: Dict[str, int] = {}
         self.active_positions: Dict[str, ActiveFundingPosition] = {}
         self.total_funding_earned_usd: float = 0.0
@@ -119,6 +134,34 @@ class FundingHarvesterStrategy(BaseStrategy):
             filename=f"funding_state_{'dry' if self.dry_run else 'live'}.json"
         )
         self.ledger = FundingLedger(dry_run=self.dry_run)
+
+        # Advanced analytics modules (initialized optionally)
+        self.funding_analytics = None
+        self.multi_exchange_monitor = None
+        self.basis_monitor = None
+        self._exchange_spreads: Dict[str, Any] = {}
+        try:
+            if enable_trend_detection:
+                from ..funding_analytics import FundingAnalytics
+                self.funding_analytics = FundingAnalytics(client=client, lookback_hours=24)
+                logger.info("📈 Modulo Funding Trend Detection attivato")
+        except Exception as e:
+            logger.debug(f"Funding Analytics non disponibile: {e}")
+        try:
+            if enable_cross_exchange:
+                from ..multi_exchange import MultiExchangeMonitor
+                self.multi_exchange_monitor = MultiExchangeMonitor()
+                logger.info("🌐 Modulo Multi-Exchange Spread Monitor attivato")
+        except Exception as e:
+            logger.debug(f"Multi-Exchange Monitor non disponibile: {e}")
+        try:
+            if enable_basis_monitor:
+                from ..basis_monitor import BasisMonitor
+                self.basis_monitor = BasisMonitor(client=client)
+                logger.info("📊 Modulo Basis Trade Monitor attivato")
+        except Exception as e:
+            logger.debug(f"Basis Monitor non disponibile: {e}")
+
 
     @property
     def current_allocation_usd(self) -> float:
@@ -225,6 +268,82 @@ class FundingHarvesterStrategy(BaseStrategy):
         """Calculate the expected hourly payment in USD."""
         return position_notional_usd * hourly_funding_rate
 
+    def compute_composite_score(self, opp: FundingOpportunity) -> float:
+        """Compute a weighted composite score (0-100) for an opportunity.
+
+        Weights: APY (40%), Trend (25%), Basis (20%), Cross-Exchange (15%).
+        """
+        score = 0.0
+
+        # 1. APY component (normalized 0-100, capped at 200% APY)
+        score += min(opp.annualized_apy_pct / 200.0, 1.0) * 40.0
+
+        # 2. Trend component (from FundingAnalytics)
+        if self.funding_analytics:
+            try:
+                trend = self.funding_analytics.get_trend(opp.coin)
+                if trend:
+                    opp.funding_trend = trend.trend
+                    opp.trend_confidence = trend.confidence
+                    opp.predicted_apy_4h = trend.predicted_apy_4h
+                    if trend.trend == "RISING":
+                        score += 25.0 * trend.confidence
+                    elif trend.trend == "STABLE":
+                        score += 12.5
+                    # FALLING → 0 punti
+            except Exception:
+                pass
+
+        # 3. Basis component (from BasisMonitor)
+        if self.basis_monitor:
+            try:
+                basis_data = self.basis_monitor.get_basis([opp.coin])
+                basis = basis_data.get(opp.coin)
+                if basis:
+                    opp.basis_bps = basis.basis_bps
+                    opp.basis_direction = basis.basis_direction
+                    if basis.basis_direction == "PREMIUM":
+                        # Max bonus a 50+ bps di premio
+                        score += min(abs(basis.basis_bps) / 50.0, 1.0) * 20.0
+                    elif basis.basis_direction == "FLAT":
+                        score += 10.0
+                    # DISCOUNT → 0 punti (il basis gioca contro di noi al close)
+            except Exception:
+                pass
+
+        # 4. Cross-exchange spread component (from MultiExchangeMonitor)
+        exchange_spread = self._exchange_spreads.get(opp.coin)
+        if exchange_spread:
+            try:
+                if exchange_spread.hl_vs_best_spread_pct >= 0:
+                    # HL paga di più o uguale → pieno punteggio
+                    score += 15.0
+                else:
+                    # Penalità proporzionale se HL paga meno
+                    score += max(0, 15.0 + exchange_spread.hl_vs_best_spread_pct * 3)
+            except Exception:
+                pass
+
+        return round(score, 2)
+
+    def _enrich_opportunities(self, opportunities: List[FundingOpportunity]) -> None:
+        """Enrich opportunities with analytics data from all modules."""
+        if not opportunities:
+            return
+
+        # Fetch cross-exchange rates in batch (one API call per exchange)
+        if self.multi_exchange_monitor:
+            try:
+                hl_rates = {o.coin: o.hourly_funding_rate for o in opportunities}
+                coins = list(hl_rates.keys())
+                self._exchange_spreads = self.multi_exchange_monitor.fetch_spreads(coins, hl_rates)
+            except Exception as e:
+                logger.debug(f"Errore fetch cross-exchange: {e}")
+
+        # Compute composite score for each opportunity
+        for opp in opportunities:
+            opp.composite_score = self.compute_composite_score(opp)
+
     def scan_opportunities(self) -> List[FundingOpportunity]:
         """Scan Hyperliquid markets for funding rate opportunities (Spot-Perp Cash & Carry or Perp-Carry)."""
         opportunities = []
@@ -308,6 +427,14 @@ class FundingHarvesterStrategy(BaseStrategy):
                     )
 
             opportunities.sort(key=lambda x: x.annualized_apy_pct, reverse=True)
+
+            # Enrich with trend, basis, and cross-exchange data (moduli avanzati)
+            self._enrich_opportunities(opportunities)
+
+            # Re-sort by composite score if analytics modules are active
+            if self.funding_analytics or self.basis_monitor or self.multi_exchange_monitor:
+                opportunities.sort(key=lambda x: x.composite_score, reverse=True)
+
         except Exception as e:
             logger.error(f"Error scanning funding rates: {e}")
 
@@ -444,7 +571,104 @@ class FundingHarvesterStrategy(BaseStrategy):
             c: count for c, count in self.candidate_seen_count.items() if c in active_candidate_coins
         }
 
-        # 2. Enter new opportunities if slots available
+        # 2. Smart Rotation: chiudi il worst e apri un candidato superiore
+        if (len(self.active_positions) >= self.max_positions
+                and opportunities
+                and self.active_positions):
+            # Trova la posizione attiva con APY più basso
+            worst_coin, worst_pos = min(
+                self.active_positions.items(),
+                key=lambda x: self.calculate_apy(x[1].current_hourly_rate or x[1].hourly_rate_at_entry)
+            )
+            worst_apy = self.calculate_apy(worst_pos.current_hourly_rate or worst_pos.hourly_rate_at_entry)
+
+            for opp in opportunities:
+                if opp.coin in self.active_positions:
+                    continue
+                if opp.annualized_apy_pct < self.min_entry_apy_pct:
+                    continue
+
+                apy_gap = opp.annualized_apy_pct - worst_apy
+                if apy_gap < self.rotation_min_spread_pct:
+                    break  # Le opportunità sono ordinate, nessun candidato migliore
+
+                # Calcola il costo di rotazione (fee round-trip vecchia + nuova)
+                notional = worst_pos.size * worst_pos.entry_price
+                round_trip_old = self.fee_calculator.calculate_round_trip_fee(
+                    size=worst_pos.size, entry_price=worst_pos.entry_price,
+                    exit_price=worst_pos.entry_price, entry_is_maker=True, exit_is_maker=True,
+                )
+                target_size = self.current_allocation_usd / opp.mark_price
+                round_trip_new = self.fee_calculator.calculate_round_trip_fee(
+                    size=target_size, entry_price=opp.mark_price,
+                    exit_price=opp.mark_price, entry_is_maker=True, exit_is_maker=True,
+                )
+                total_rotation_cost = round_trip_old["total_fee_usd"] + round_trip_new["total_fee_usd"]
+                if self.hedge_mode == "spot-perp":
+                    total_rotation_cost *= 2  # Due gambe per posizione
+
+                # Calcola le ore di breakeven
+                new_hourly_funding = self.calculate_funding_payment(self.current_allocation_usd, opp.hourly_funding_rate)
+                old_hourly_funding = self.calculate_funding_payment(notional, worst_pos.current_hourly_rate or 0)
+                delta_hourly = new_hourly_funding - old_hourly_funding
+                if delta_hourly <= 0:
+                    continue
+
+                hours_to_breakeven = total_rotation_cost / delta_hourly
+                if hours_to_breakeven > self.rotation_max_breakeven_hours:
+                    logger.info(
+                        f"⏳ [ROTAZIONE SALTATA] {opp.coin} ({opp.annualized_apy_pct:.1f}%) vs {worst_coin} ({worst_apy:.1f}%): "
+                        f"breakeven {hours_to_breakeven:.1f}h > soglia {self.rotation_max_breakeven_hours:.0f}h"
+                    )
+                    continue
+
+                # Esegui la rotazione!
+                logger.info(
+                    f"🔄 [ROTAZIONE] Chiusura {worst_coin} ({worst_apy:.1f}% APY) → "
+                    f"Apertura {opp.coin} ({opp.annualized_apy_pct:.1f}% APY) | "
+                    f"Gap: +{apy_gap:.1f}% | Breakeven: {hours_to_breakeven:.1f}h | "
+                    f"Costo: ${total_rotation_cost:.4f}"
+                )
+
+                # Chiudi la posizione peggiore
+                if not self.dry_run:
+                    try:
+                        if worst_pos.hedge_mode == "spot-perp":
+                            spot_pair = worst_pos.spot_pair_name or f"{worst_coin}/USDC"
+                            self.client.order_market_close(name=spot_pair, size=worst_pos.spot_size, is_spot=True)
+                            self.client.order_market_close(name=worst_coin, size=worst_pos.perp_size, is_spot=False)
+                        else:
+                            self.client.order_market_close(name=worst_coin, size=worst_pos.size, is_spot=False)
+                    except Exception as e:
+                        logger.error(f"Errore chiusura rotazione per {worst_coin}: {e}")
+                        continue
+
+                # Registra nel ledger
+                self.ledger.record_close(
+                    coin=worst_coin, size=worst_pos.size, entry_price=worst_pos.entry_price,
+                    entry_time=worst_pos.entry_time, exit_time=now,
+                    apy_entry_pct=self.calculate_apy(worst_pos.hourly_rate_at_entry),
+                    apy_exit_pct=worst_apy, funding_usd=worst_pos.accumulated_funding_usd,
+                    exit_reason=f"Rotazione → {opp.coin} (+{apy_gap:.0f}% APY gap, breakeven {hours_to_breakeven:.1f}h)",
+                    side=worst_pos.side, hedge_mode=worst_pos.hedge_mode,
+                    spot_pair=worst_pos.spot_pair_name or "", dry_run=self.dry_run,
+                )
+                self.total_funding_earned_usd += worst_pos.accumulated_funding_usd
+
+                if self.telegram:
+                    self.telegram.send_trade_alert(
+                        action=f"🔄 Rotazione ({worst_pos.hedge_mode})",
+                        symbol=f"{worst_coin} → {opp.coin}",
+                        size=worst_pos.size, price=worst_pos.entry_price,
+                        pnl=worst_pos.accumulated_funding_usd,
+                        notes=f"Chiuso {worst_coin} ({worst_apy:.1f}%) | Apertura {opp.coin} ({opp.annualized_apy_pct:.1f}%) | Gap: +{apy_gap:.1f}%",
+                    )
+
+                del self.active_positions[worst_coin]
+                # Il candidato verrà aperto nella sezione entrate qui sotto
+                break  # Una sola rotazione per tick
+
+        # 3. Enter new opportunities if slots available
         for opp in opportunities:
             if len(self.active_positions) >= self.max_positions:
                 break
@@ -813,11 +1037,57 @@ class FundingHarvesterStrategy(BaseStrategy):
                 badge = f"{side_badge}"
                 spot_str = ""
 
+            extra_metrics = []
+            if opp.composite_score > 0:
+                extra_metrics.append(f"Score: <b>{opp.composite_score:.1f}</b>")
+            if opp.funding_trend:
+                trend_icon = "📈" if opp.funding_trend == "RISING" else ("📉" if opp.funding_trend == "FALLING" else "➡️")
+                extra_metrics.append(f"{trend_icon} {opp.funding_trend}")
+            if opp.basis_bps is not None:
+                extra_metrics.append(f"Basis: <b>{opp.basis_bps:+.1f} bps</b>")
+
+            extra_str = f"   🎯 {' | '.join(extra_metrics)}\n" if extra_metrics else ""
+
             lines.append(
                 f"<b>{i}. {opp.coin}</b> ({badge}){status_flag}\n"
                 f"   📈 APY: <b>{opp.annualized_apy_pct:.1f}%</b> ({opp.hourly_funding_rate * 100:.4f}%/h){spot_str}\n"
+                f"{extra_str}"
                 f"   💵 Prezzo: ${opp.mark_price:,.2f} | OI: {oi_str}\n"
             )
         lines.append("━━━━━━━━━━━━━━━━━━━━━━")
         lines.append(f"<i>Persistenza: {self.persistence_checks_required} tick | Min OI: ${self.min_open_interest_usd:,.0f}</i>")
         return "\n".join(lines)
+
+    def get_funding_report(self, limit: int = 5) -> str:
+        """Format funding trend analytics report for Telegram /funding."""
+        if not self.funding_analytics:
+            return "ℹ️ <b>Modulo Funding Analytics non attivo.</b>"
+        opps = self.scan_opportunities()
+        coins = [o.coin for o in opps[:limit * 2]] or list(self.active_positions.keys())
+        if not coins:
+            return "ℹ️ <b>Nessun asset disponibile per l'analisi del funding.</b>"
+        return self.funding_analytics.format_funding_report(coins, limit=limit)
+
+    def get_spread_report(self, limit: int = 5) -> str:
+        """Format cross-exchange spread report for Telegram /spread."""
+        if not self.multi_exchange_monitor:
+            return "ℹ️ <b>Modulo Multi-Exchange non attivo.</b>"
+        if not self._exchange_spreads:
+            opps = self.scan_opportunities()
+            hl_rates = {o.coin: o.hourly_funding_rate for o in opps[:limit * 2]}
+            coins = list(hl_rates.keys())
+            self._exchange_spreads = self.multi_exchange_monitor.fetch_spreads(coins, hl_rates)
+        return self.multi_exchange_monitor.format_spread_report(self._exchange_spreads, limit=limit)
+
+    def get_basis_report(self, limit: int = 5) -> str:
+        """Format spot-perp basis report for Telegram /basis."""
+        if not self.basis_monitor:
+            return "ℹ️ <b>Modulo Basis Monitor non attivo.</b>"
+        opps = self.scan_opportunities()
+        coins = [o.coin for o in opps if o.is_spot_perp_match][:limit] or [
+            p.coin for p in self.active_positions.values() if p.hedge_mode == "spot-perp"
+        ]
+        if not coins:
+            return "ℹ️ <b>Nessuna coppia Spot-Perp disponibile per l'analisi del basis.</b>"
+        return self.basis_monitor.format_basis_report(coins, limit=limit)
+

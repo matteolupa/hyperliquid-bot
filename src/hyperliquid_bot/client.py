@@ -157,6 +157,57 @@ class HyperliquidClient:
             builder_fee_bps=builder_fee_bps,
         )
 
+    def get_funding_history(self, coin: str, lookback_hours: int = 24) -> List[Dict[str, Any]]:
+        """Retrieve historical hourly funding rates for a coin.
+
+        Args:
+            coin: Symbol name (e.g. 'BTC', 'HYPE').
+            lookback_hours: Number of hours of history to fetch (default: 24).
+
+        Returns:
+            List of dicts with keys: coin, fundingRate, premium, time (ms).
+        """
+        import time as _time
+        start_time = int((_time.time() - lookback_hours * 3600) * 1000)
+        try:
+            return self.info.funding_history(coin, start_time)
+        except Exception:
+            return []
+
+    def get_spot_asset_ctxs(self) -> Dict[str, Dict[str, Any]]:
+        """Get spot market mid prices for tokens with active USDC pairs.
+
+        Returns:
+            Dict mapping coin name to spot context with 'midPx' and pair metadata.
+        """
+        result: Dict[str, Dict[str, Any]] = {}
+        try:
+            spot_meta, spot_ctxs = self.info.spot_meta_and_asset_ctxs()
+            tokens = spot_meta.get("tokens", [])
+            token_by_idx = {t["index"]: t for t in tokens}
+            universe = spot_meta.get("universe", [])
+
+            for i, pair in enumerate(universe):
+                if i >= len(spot_ctxs):
+                    break
+                t_idxs = pair.get("tokens", [])
+                # Quote token 0 is USDC on Hyperliquid L1
+                if len(t_idxs) == 2 and t_idxs[1] == 0:
+                    base_t = token_by_idx.get(t_idxs[0])
+                    if base_t:
+                        name = base_t.get("name")
+                        if name:
+                            ctx = spot_ctxs[i] if isinstance(spot_ctxs[i], dict) else {}
+                            mid_px = ctx.get("midPx") or ctx.get("markPx") or "0"
+                            result[name] = {
+                                "midPx": mid_px,
+                                "pair_name": pair.get("name", ""),
+                                "pair_index": pair.get("index"),
+                            }
+        except Exception:
+            pass
+        return result
+
     def get_spot_perp_matches(self) -> Dict[str, Dict[str, Any]]:
         """Map tokens that have both an active Perpetual and a Spot market against USDC.
 

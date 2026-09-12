@@ -21,6 +21,9 @@ from .strategies import (
 )
 from .ledger import FundingLedger
 from .telegram import TelegramNotifier
+from .funding_analytics import FundingAnalytics, FundingTrend
+from .multi_exchange import MultiExchangeMonitor, ExchangeSpread
+from .basis_monitor import BasisMonitor, BasisData
 
 __all__ = [
     "HyperliquidClient",
@@ -42,6 +45,12 @@ __all__ = [
     "setup_logger",
     "TelegramNotifier",
     "FundingLedger",
+    "FundingAnalytics",
+    "FundingTrend",
+    "MultiExchangeMonitor",
+    "ExchangeSpread",
+    "BasisMonitor",
+    "BasisData",
 ]
 
 __version__ = "0.1.0"

@@ -87,6 +87,9 @@ class BotEngine:
             self.telegram.register_command("/balance", self._cmd_balance)
             self.telegram.register_command("/history", self._cmd_history)
             self.telegram.register_command("/watchlist", self._cmd_watchlist)
+            self.telegram.register_command("/funding", self._cmd_funding)
+            self.telegram.register_command("/spread", self._cmd_spread)
+            self.telegram.register_command("/basis", self._cmd_basis)
             self.telegram.register_command("/closeall", self._cmd_closeall)
             self.telegram.start_polling()
             self.telegram.send_startup(
@@ -223,6 +226,24 @@ class BotEngine:
         if hasattr(self.strategy, "get_watchlist_report"):
             return self.strategy.get_watchlist_report()
         return "ℹ️ Nessuna watchlist disponibile per questa strategia."
+
+    def _cmd_funding(self) -> str:
+        """Handle /funding command from Telegram."""
+        if hasattr(self.strategy, "get_funding_report"):
+            return self.strategy.get_funding_report()
+        return "ℹ️ Analisi funding non disponibile per questa strategia."
+
+    def _cmd_spread(self) -> str:
+        """Handle /spread command from Telegram."""
+        if hasattr(self.strategy, "get_spread_report"):
+            return self.strategy.get_spread_report()
+        return "ℹ️ Analisi spread cross-exchange non disponibile per questa strategia."
+
+    def _cmd_basis(self) -> str:
+        """Handle /basis command from Telegram."""
+        if hasattr(self.strategy, "get_basis_report"):
+            return self.strategy.get_basis_report()
+        return "ℹ️ Analisi basis non disponibile per questa strategia."
 
     def _cmd_closeall(self) -> str:
         """Handle /closeall command from Telegram."""

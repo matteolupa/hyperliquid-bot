@@ -1,6 +1,6 @@
 """Hyperliquid SDK Client wrapper."""
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 try:
     from eth_account import Account

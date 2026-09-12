@@ -120,44 +120,83 @@ class BasisMonitor:
         
         # Se la cache è scaduta, aggiorniamo i dati
         if current_time - self._last_update > self.refresh_interval_seconds or not self._cache:
-            spot_prices = self._fetch_spot_prices()
-            perp_prices = self._fetch_perp_prices()
-            
             self._cache.clear()
             
-            # Calcoliamo il basis per ogni moneta disponibile in entrambi i mercati
-            for coin in set(list(spot_prices.keys()) + list(perp_prices.keys())):
-                if coin in spot_prices and coin in perp_prices:
-                    spot_mid_price = spot_prices[coin]
-                    perp_mark_price = perp_prices[coin]
-                    
-                    if spot_mid_price <= 0:
-                        continue
+            # 1. Metodo primario live: all_mids + get_spot_perp_matches (estremamente preciso e veloce)
+            used_all_mids = False
+            if (hasattr(self.client, "get_spot_perp_matches")
+                    and hasattr(self.client, "info")
+                    and hasattr(self.client.info, "all_mids")):
+                try:
+                    matches = self.client.get_spot_perp_matches()
+                    all_mids = self.client.info.all_mids()
+                    for coin in (coins or list(matches.keys())):
+                        match = matches.get(coin)
+                        if match:
+                            spot_pair = match.get("spot_pair_name")
+                            spot_px = float(all_mids.get(spot_pair, 0))
+                            perp_px = float(all_mids.get(coin, 0))
+                            if spot_px > 0 and perp_px > 0:
+                                basis_bps = ((perp_px - spot_px) / spot_px) * 10000.0
+                                # Sanity filter: su coppie reali Spot-Perp il basis non supera il 5% (500 bps).
+                                # Valori superiori indicano ticker omonimi non collegati all'asset reale.
+                                if abs(basis_bps) > 500.0:
+                                    continue
+                                basis_pct = basis_bps / 100.0
+                                if basis_bps > 1.0:
+                                    direction = "PREMIUM"
+                                elif basis_bps < -1.0:
+                                    direction = "DISCOUNT"
+                                else:
+                                    direction = "FLAT"
+                                annualized_basis_apy = (abs(basis_pct) / 100.0) * (365.0 * 24.0 / 8.0) * 100.0
+                                self._cache[coin] = BasisData(
+                                    coin=coin,
+                                    spot_mid_price=spot_px,
+                                    perp_mark_price=perp_px,
+                                    basis_bps=round(basis_bps, 2),
+                                    basis_pct=round(basis_pct, 4),
+                                    basis_direction=direction,
+                                    annualized_basis_apy=round(annualized_basis_apy, 2),
+                                )
+                    used_all_mids = len(self._cache) > 0
+                except Exception as e:
+                    logger.debug(f"all_mids basis fetch fallback: {e}")
+
+            # 2. Metodo fallback (per mock e test unitari dove all_mids non è implementato)
+            if not used_all_mids:
+                spot_prices = self._fetch_spot_prices()
+                perp_prices = self._fetch_perp_prices()
+                
+                for coin in set(list(spot_prices.keys()) + list(perp_prices.keys())):
+                    if coin in spot_prices and coin in perp_prices:
+                        spot_mid_price = spot_prices[coin]
+                        perp_mark_price = perp_prices[coin]
                         
-                    # Calcolo spread in bps e percentuale
-                    basis_bps = ((perp_mark_price - spot_mid_price) / spot_mid_price) * 10000.0
-                    basis_pct = basis_bps / 100.0
-                    
-                    # Determinazione della direzione
-                    if basis_bps > 1.0:
-                        direction = "PREMIUM"
-                    elif basis_bps < -1.0:
-                        direction = "DISCOUNT"
-                    else:
-                        direction = "FLAT"
+                        if spot_mid_price <= 0:
+                            continue
+                            
+                        basis_bps = ((perp_mark_price - spot_mid_price) / spot_mid_price) * 10000.0
+                        basis_pct = basis_bps / 100.0
                         
-                    # Calcolo APY assumendo convergenza in 8 ore
-                    annualized_basis_apy = (abs(basis_pct) / 100.0) * (365.0 * 24.0 / 8.0) * 100.0
-                    
-                    self._cache[coin] = BasisData(
-                        coin=coin,
-                        spot_mid_price=spot_mid_price,
-                        perp_mark_price=perp_mark_price,
-                        basis_bps=basis_bps,
-                        basis_pct=basis_pct,
-                        basis_direction=direction,
-                        annualized_basis_apy=annualized_basis_apy
-                    )
+                        if basis_bps > 1.0:
+                            direction = "PREMIUM"
+                        elif basis_bps < -1.0:
+                            direction = "DISCOUNT"
+                        else:
+                            direction = "FLAT"
+                            
+                        annualized_basis_apy = (abs(basis_pct) / 100.0) * (365.0 * 24.0 / 8.0) * 100.0
+                        
+                        self._cache[coin] = BasisData(
+                            coin=coin,
+                            spot_mid_price=spot_mid_price,
+                            perp_mark_price=perp_mark_price,
+                            basis_bps=round(basis_bps, 2),
+                            basis_pct=round(basis_pct, 4),
+                            basis_direction=direction,
+                            annualized_basis_apy=round(annualized_basis_apy, 2),
+                        )
                     
             self._last_update = current_time
 

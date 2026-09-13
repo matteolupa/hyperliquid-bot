@@ -147,28 +147,62 @@ class PerformanceTracker:
         )
         capital = status.get("capital_allocated_usd", 0.0)
         active_count = len(status.get("active_positions", {}))
+        accrued = status.get("total_accrued_funding_usd", 0.0)
+        hourly_yield = status.get("hourly_yield_usd", 0.0)
+        daily_yield = status.get("daily_yield_usd", 0.0)
 
         # Realized APY based on 24h run-rate
         projected_apy_24h = (stats["roi_24h_pct"] * 365.0) if stats["roi_24h_pct"] > 0 else 0.0
+
+        now = time.time()
+        sec_to_next = 3600 - int(now % 3600)
+        mins_to_next = sec_to_next // 60
 
         lines = [
             "📈 <b>Performance & Rendimenti Funding Arbitrage</b>",
             "━━━━━━━━━━━━━━━━━━━━━━",
             f"🏦 <b>Capitale Allocato:</b> <code>${capital:,.2f}</code> ({active_count} posizioni)",
-            f"🏆 <b>Totale Storico Guadagnato:</b> <b>+${lifetime_earned:,.4f} USD</b>",
-            "━━━━━━━━━━━━━━━━━━━━━━",
-            "⏱️ <b>Ultime 24 Ore:</b>",
-            f"  • Guadagno Netto: 🟢 <b>+${stats["earnings_24h_usd"]:.4f} USD</b>",
-            f"  • ROI 24h: <b>+{stats["roi_24h_pct"]:.2f}%</b> (Proiez. APY: {projected_apy_24h:.1f}%)",
-            f"  • Pagamenti Orari Incassati: <b>{stats["payments_count_24h"]}</b>",
-            f"  • Rendita Oraria Media: +${stats["avg_hourly_24h_usd"]:.4f}/h",
-            "━━━━━━━━━━━━━━━━━━━━━━",
-            "📅 <b>Ultimi 7 Giorni:</b>",
-            f"  • Guadagno Complessivo: 🟢 <b>+${stats["earnings_7d_usd"]:.4f} USD</b>",
-            f"  • ROI 7d: <b>+{stats["roi_7d_pct"]:.2f}%</b>",
-            f"  • Accrediti Totali: <b>{stats["payments_count_7d"]}</b>",
-            f"  • Rendita Giornaliera Media: +${stats["earnings_7d_usd"]/7.0:.2f}/giorno" if stats["earnings_7d_usd"] > 0 else "  • Rendita Giornaliera Media: $0.00/giorno",
-            "━━━━━━━━━━━━━━━━━━━━━━",
-            f"<i>Registrazione continua su {self.filename}</i>",
+            f"🏆 <b>Totale Storico Incassato:</b> <b>+${lifetime_earned:,.4f} USD</b>",
         ]
+        if active_count > 0:
+            lines.append(f"⚡ <b>Rendita Stimata Live:</b> +${hourly_yield:.4f}/h (+${daily_yield:.2f}/giorno)")
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+
+        if stats["total_snapshots"] < 24:
+            lines.append(f"⏱️ <b>Ultime 24 Ore:</b> <i>({stats['total_snapshots']}/24 snapshot orari raccolti)</i>")
+        else:
+            lines.append("⏱️ <b>Ultime 24 Ore:</b>")
+
+        if stats["total_snapshots"] == 0:
+            lines.append(f"  • Status: <i>In accumulo (1° rollover :00 UTC tra ~{mins_to_next}m)</i>")
+            lines.append(f"  • Funding Maturato Attivo: 🟢 <b>+${accrued:.4f} USD</b>")
+            run_rate_roi = (daily_yield / capital * 100.0) if capital > 0 else 0.0
+            run_rate_apy = run_rate_roi * 365.0
+            lines.append(f"  • Proiezione 24h Live: <b>+${daily_yield:.2f} USD</b> (~{run_rate_apy:.1f}% APY)")
+        else:
+            lines.append(f"  • Guadagno Netto: 🟢 <b>+${stats['earnings_24h_usd']:.4f} USD</b>")
+            lines.append(f"  • ROI 24h: <b>+{stats['roi_24h_pct']:.2f}%</b> (Proiez. APY: {projected_apy_24h:.1f}%)")
+            lines.append(f"  • Pagamenti Orari Incassati: <b>{stats['payments_count_24h']}</b>")
+            lines.append(f"  • Rendita Oraria Media: +${stats['avg_hourly_24h_usd']:.4f}/h")
+
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+
+        if stats["total_snapshots"] < 168:
+            days_collected = round(stats["total_snapshots"] / 24.0, 1)
+            lines.append(f"📅 <b>Ultimi 7 Giorni:</b> <i>({days_collected}/7 giorni registrati)</i>")
+        else:
+            lines.append("📅 <b>Ultimi 7 Giorni:</b>")
+
+        if stats["total_snapshots"] == 0:
+            lines.append(f"  • Status: <i>In accumulo progressivo su {self.filename}</i>")
+            lines.append(f"  • Proiezione 7d Live: <b>+${daily_yield * 7.0:.2f} USD</b>")
+        else:
+            lines.append(f"  • Guadagno Complessivo: 🟢 <b>+${stats['earnings_7d_usd']:.4f} USD</b>")
+            lines.append(f"  • ROI 7d: <b>+{stats['roi_7d_pct']:.2f}%</b>")
+            lines.append(f"  • Accrediti Totali: <b>{stats['payments_count_7d']}</b>")
+            avg_daily = (stats["earnings_7d_usd"] / (max(1, stats["total_snapshots"]) / 24.0)) if stats["earnings_7d_usd"] > 0 else 0.0
+            lines.append(f"  • Rendita Giornaliera Media: +${avg_daily:.2f}/giorno")
+
+        lines.append("━━━━━━━━━━━━━━━━━━━━━━")
+        lines.append(f"ℹ️ <i>Snapshot orario automatico ad ogni :00 UTC su {self.filename}</i>")
         return "\n".join(lines)

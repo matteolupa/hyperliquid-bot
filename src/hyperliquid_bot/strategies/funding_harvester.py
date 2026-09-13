@@ -973,6 +973,10 @@ class FundingHarvesterStrategy(BaseStrategy):
         total_allocated = sum(p.size * p.entry_price for p in self.active_positions.values())
         total_accrued = sum(p.accumulated_funding_usd for p in self.active_positions.values())
         total_lifetime = self.total_funding_earned_usd + total_accrued
+        total_hourly_rate = sum(
+            self.calculate_funding_payment(p.size * p.entry_price, p.current_hourly_rate or p.hourly_rate_at_entry)
+            for p in self.active_positions.values()
+        )
         return {
             "strategy": self.name,
             "hedge_mode": self.hedge_mode,
@@ -980,6 +984,9 @@ class FundingHarvesterStrategy(BaseStrategy):
             "active_positions_count": len(self.active_positions),
             "capital_allocated_usd": round(total_allocated, 2),
             "total_lifetime_earnings_usd": round(total_lifetime, 4),
+            "total_accrued_funding_usd": round(total_accrued, 4),
+            "hourly_yield_usd": round(total_hourly_rate, 4),
+            "daily_yield_usd": round(total_hourly_rate * 24.0, 4),
             "compounded_boost_usd": round(total_lifetime if self.auto_compound else 0.0, 4),
             "active_positions": {
                 coin: {

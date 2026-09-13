@@ -130,36 +130,34 @@ class BasisMonitor:
                 try:
                     matches = self.client.get_spot_perp_matches()
                     all_mids = self.client.info.all_mids()
-                    for coin in (coins or list(matches.keys())):
-                        match = matches.get(coin)
-                        if match:
-                            spot_pair = match.get("spot_pair_name")
-                            spot_px = float(all_mids.get(spot_pair, 0))
-                            perp_px = float(all_mids.get(coin, 0))
-                            if spot_px > 0 and perp_px > 0:
-                                basis_bps = ((perp_px - spot_px) / spot_px) * 10000.0
-                                # Sanity filter: su coppie reali Spot-Perp il basis non supera il 5% (500 bps).
-                                # Valori superiori indicano ticker omonimi non collegati all'asset reale.
-                                if abs(basis_bps) > 500.0:
-                                    continue
-                                basis_pct = basis_bps / 100.0
-                                if basis_bps > 1.0:
-                                    direction = "PREMIUM"
-                                elif basis_bps < -1.0:
-                                    direction = "DISCOUNT"
-                                else:
-                                    direction = "FLAT"
-                                annualized_basis_apy = (abs(basis_pct) / 100.0) * (365.0 * 24.0 / 8.0) * 100.0
-                                self._cache[coin] = BasisData(
-                                    coin=coin,
-                                    spot_mid_price=spot_px,
-                                    perp_mark_price=perp_px,
-                                    basis_bps=round(basis_bps, 2),
-                                    basis_pct=round(basis_pct, 4),
-                                    basis_direction=direction,
-                                    annualized_basis_apy=round(annualized_basis_apy, 2),
-                                )
-                    used_all_mids = len(self._cache) > 0
+                    for coin, match in matches.items():
+                        spot_pair = match.get("spot_pair_name")
+                        spot_px = float(all_mids.get(spot_pair, 0))
+                        perp_px = float(all_mids.get(coin, 0))
+                        if spot_px > 0 and perp_px > 0:
+                            basis_bps = ((perp_px - spot_px) / spot_px) * 10000.0
+                            # Sanity filter: su coppie reali Spot-Perp il basis non supera il 5% (500 bps).
+                            # Valori superiori indicano ticker omonimi non collegati all'asset reale.
+                            if abs(basis_bps) > 500.0:
+                                continue
+                            basis_pct = basis_bps / 100.0
+                            if basis_bps > 1.0:
+                                direction = "PREMIUM"
+                            elif basis_bps < -1.0:
+                                direction = "DISCOUNT"
+                            else:
+                                direction = "FLAT"
+                            annualized_basis_apy = (abs(basis_pct) / 100.0) * (365.0 * 24.0 / 8.0) * 100.0
+                            self._cache[coin] = BasisData(
+                                coin=coin,
+                                spot_mid_price=spot_px,
+                                perp_mark_price=perp_px,
+                                basis_bps=round(basis_bps, 2),
+                                basis_pct=round(basis_pct, 4),
+                                basis_direction=direction,
+                                annualized_basis_apy=round(annualized_basis_apy, 2),
+                            )
+                    used_all_mids = True
                 except Exception as e:
                     logger.debug(f"all_mids basis fetch fallback: {e}")
 
@@ -206,7 +204,7 @@ class BasisMonitor:
             if coin in self._cache:
                 result[coin] = self._cache[coin]
             else:
-                logger.warning(f"Dati basis non trovati per la moneta: {coin}")
+                logger.debug(f"Dati basis non trovati o coppia spot assente per la moneta: {coin}")
                 
         return result
 

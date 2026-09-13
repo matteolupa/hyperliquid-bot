@@ -231,13 +231,16 @@ class HyperliquidClient:
                     if base_t:
                         name = base_t.get("name")
                         if name and name in perp_names:
-                            matches[name] = {
-                                "coin": name,
-                                "spot_pair_name": p.get("name"),
-                                "spot_pair_index": p.get("index"),
-                                "sz_decimals": base_t.get("szDecimals", 0),
-                                "is_canonical": base_t.get("isCanonical", False),
-                            }
+                            is_canonical = base_t.get("isCanonical", False)
+                            # Prefer canonical token if multiple tokens share the same name
+                            if name not in matches or (is_canonical and not matches[name].get("is_canonical")):
+                                matches[name] = {
+                                    "coin": name,
+                                    "spot_pair_name": p.get("name"),
+                                    "spot_pair_index": p.get("index"),
+                                    "sz_decimals": base_t.get("szDecimals", 0),
+                                    "is_canonical": is_canonical,
+                                }
         except Exception as e:
             pass
         return matches

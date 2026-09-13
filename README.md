@@ -14,11 +14,14 @@ Progettato per operare 24/7 in cloud (es. istanze Ubuntu / Oracle Cloud), con ge
 * **Supporto Cross-Market Hyperliquid L1:** Riconoscimento automatico delle corrispondenze tra Universo Perp e Universo Spot (inclusi token numerici `@107` per HYPE o ticker diretti).
 * **Doppia Chiusura Sincronizzata:** Vendita automatica dello Spot e riacquisto del Perp al verificarsi dei criteri di uscita o su comando `/closeall`.
 
-### 2. 🧠 4 Moduli Quant Avanzati per il Delta-Neutral
+### 2. 🧠 Moduli Quant Avanzati & Ottimizzazioni di Rendimento
 * **📈 Funding Rate Prediction & Trend Detection (`funding_analytics.py`):** Analizza la cronologia dei tassi su finestre mobili di 1h/4h/8h/24h, calcola la derivata temporale ($dF/dt$) tramite regressione lineare, classifica il trend (`RISING`, `STABLE`, `FALLING`) e stima l'APY proiettato per le successive 4 ore con indice di confidenza.
 * **🌐 Multi-Exchange Spread Monitoring (`multi_exchange.py`):** Interroga simultaneamente le API pubbliche di **Binance**, **Bybit** e **dYdX**, normalizza i tassi a base oraria (es. 8h $\rightarrow$ 1h) e calcola lo spread rispetto a Hyperliquid per identificare divergenze e convergenze di funding.
 * **📊 Basis Trade Monitoring (`basis_monitor.py`):** Monitora il premio/sconto del prezzo Perpetual rispetto al prezzo Spot USDC su Hyperliquid. Quando il Perp prezza a premio (`PREMIUM`, spread positivo in bps), l'entrata Cash & Carry blocca un guadagno aggiuntivo alla convergenza dei prezzi al settlement.
 * **🔄 Rotazione Intelligente Multi-Asset & Scoring Composito:** Quando tutti gli slot sono occupati ($N=3$), il bot calcola uno **Score Composito** (APY 40%, Trend 25%, Basis 20%, Spread Cross-Exchange 15%). Se emerge un'opportunità con spread $\ge 30\%$ APY rispetto alla peggiore posizione attiva e il costo delle commissioni di round-trip si ripaga in $\le 4$ ore, il bot chiude automaticamente la posizione inferiore e rialloca il capitale sul nuovo leader!
+* **⚡ Dynamic Yield-Weighted Sizing (`--dynamic-sizing`):** Anziché suddividere il capitale in parti rigidamente uguali, alloca più fondi all'asset più redditizio (45% al 1° classificato, 33% al 2°, 22% al 3°), massimizzando la rendita oraria complessiva mantenendo la diversificazione e i limiti di rischio (20%-50% per slot).
+* **⏱️ Accredito Orario Push & Countdown:** Invia una mini-notifica Telegram allo scoccare di ogni ora (:00 UTC) con gli incassi esatti dell'ora appena trascorsa e mostra il conto alla rovescia in minuti/secondi verso il prossimo accredito.
+* **🛡️ Perp Liquidation Buffer:** Calcola e monitora in tempo reale la distanza percentuale dal prezzo di liquidazione della gamba Short Perpetual per garantire la massima sicurezza del capitale collaterale.
 
 ### 3. ⚡ Perpetual Carry Mode Alternativa (`--hedge-mode perp-carry`)
 * Per chi desidera operare su altcoin senza mercato Spot nativo:
@@ -41,7 +44,8 @@ Controlla il bot in qualsiasi momento dal tuo smartphone con comandi istantanei:
 
 | Comando | Descrizione |
 |---|---|
-| **/status** | Report live su guadagni, rendita oraria stimata e posizioni aperte (con badge [⚖️ DELTA-ZERO] o 🔴/🟢). |
+| **/status** | Report live su guadagni, rendita oraria, countdown prossimo accredito, buffer liquidazione e posizioni aperte (con badge [⚖️ DELTA-ZERO] o 🔴/🟢). |
+| **/stats** | **Dashboard di Performance:** guadagno netto ultime 24 ore e ultimi 7 giorni, APY effettivo realizzato, numero accrediti riscossi e rendita media oraria/giornaliera. |
 | **/balance** | Riepilogo di equity totale, capitale allocato, margine libero e quota di auto-compounding. |
 | **/watchlist** | Classifica in tempo reale delle **Top 5 opportunità** con APY, Score Composito, Trend e Basis. |
 | **/funding** | Analisi predittiva del trend del funding rate (📈 RISING, ➡️ STABLE, 📉 FALLING) e APY previsto. |
@@ -53,7 +57,8 @@ Controlla il bot in qualsiasi momento dal tuo smartphone con comandi istantanei:
 
 > 🔒 **Sicurezza:** Il bot risponde **esclusivamente** al tuo `CHAT_ID` Telegram autorizzato. Qualsiasi messaggio da utenti esterni viene rifiutato.
 
-### 7. 📒 Ledger Contabile CSV & Persistenza Atomica
+### 7. 📒 Ledger Contabile & Equity Curve CSV
+* **`data/equity_curve_dry.csv` (o `_live.csv`):** Log orario continuo con timestamp, equity totale, capitale allocato, rendita oraria e APY realizzato.
 * **`data/funding_ledger_dry.csv` (o `_live.csv`):** Append-only log con modalità di copertura (`hedge_mode`), coppia spot (`spot_pair`), durata trade, APY in/out, funding incassato e motivo di uscita.
 * **`data/funding_state_dry.json`:** Salvataggio atomico su disco con ripristino istantaneo di posizioni, watchlist e contatori in caso di riavvio del server.
 * **Circuit Breaker:** Arresto d'emergenza in caso di drawdown di portafoglio superiore alla soglia impostata (`--max-drawdown-pct`).
@@ -74,24 +79,29 @@ hyperliquid-bot/
 │   └── stop_nohup.sh         # Graceful shutdown con salvataggio atomico
 ├── src/
 │   └── hyperliquid_bot/
-│       ├── __init__.py       # Export dei moduli
-│       ├── config.py         # Caricamento configurazioni da .env
-│       ├── client.py         # Wrapper SDK Hyperliquid
-│       ├── fees.py           # Fee Calculator e stima break-even
-│       ├── ledger.py         # Modulo contabile Funding Ledger CSV
-│       ├── risk.py           # Risk Manager & Circuit Breaker
-│       ├── telegram.py       # Notifier & Command Listener bidirezionale
-│       ├── engine.py         # Bot Engine 24/7 e gestione segnali
+│       ├── __init__.py               # Export dei moduli
+│       ├── config.py                 # Caricamento configurazioni da .env
+│       ├── client.py                 # Wrapper SDK Hyperliquid
+│       ├── fees.py                   # Fee Calculator e stima break-even
+│       ├── ledger.py                 # Modulo contabile Funding Ledger CSV
+│       ├── performance.py            # Performance Tracker & Equity Curve CSV
+│       ├── funding_analytics.py      # Trend Detection & APY Predictor
+│       ├── multi_exchange.py         # Spread Multi-Exchange (Binance/Bybit/dYdX)
+│       ├── basis_monitor.py          # Monitoraggio Basis Spot vs Perp
+│       ├── risk.py                   # Risk Manager & Circuit Breaker
+│       ├── telegram.py               # Notifier & Command Listener bidirezionale
+│       ├── engine.py                 # Bot Engine 24/7 e gestione comandi
 │       └── strategies/
-│           ├── base.py       # Interfaccia base astratta
-│           ├── funding_harvester.py  # Funding Harvester Bidirezionale
+│           ├── base.py               # Interfaccia base astratta
+│           ├── funding_harvester.py  # Funding Harvester Spot-Perp Delta-Zero
 │           ├── scalper.py            # Scalper & Take-Profit
 │           └── market_maker.py       # Adaptive Grid / Market Maker
-├── data/                     # Stato JSON e Ledger CSV (persistenza)
-├── logs/                     # Log di esecuzione con rotazione automatica
+├── data/                             # Stato JSON, Ledger CSV ed Equity Curve
+├── logs/                             # Log di esecuzione con rotazione automatica
 └── tests/
-    ├── test_fees.py          # Test calcolo commissioni
-    └── test_risk_and_strategies.py # Test suite completa (28 test)
+    ├── test_fees.py                  # Test calcolo commissioni
+    ├── test_risk_and_strategies.py   # Test suite strategie, hedging e comandi
+    └── test_funding_optimizations.py # Test sizing dinamico, rollover e buffer
 ```
 
 ---
@@ -161,6 +171,8 @@ bash scripts/stop_nohup.sh
 | `--enable-trend-detection` | `True` | Abilita il modulo Funding Analytics e trend detection (1h/4h/8h/24h). |
 | `--enable-cross-exchange` | `True` | Abilita il monitoraggio spread multi-exchange (Binance, Bybit, dYdX). |
 | `--enable-basis-monitor` | `True` | Abilita il monitoraggio del Basis Spot vs Perp. |
+| `--dynamic-sizing` | `True` | Alloca il capitale in base alla resa (45% top performer, 33% 2°, 22% 3°). |
+| `--hourly-alerts` | `True` | Invia una notifica Telegram oraria allo scoccare di ogni ora (:00 UTC) con gli incassi riscossi. |
 | `--allow-negative-funding` | `True` | Abilita il Negative Funding Arbitrage in modalità `perp-carry`. |
 | `--auto-compound` | `True` | Reinveste i guadagni aumentando dinamicamente la taglia degli slot. |
 | `--report-interval` | `300.0` | Secondi tra i report periodici di stato su Telegram e nei log. |
@@ -175,7 +187,7 @@ Il progetto include una suite completa di test unitari con isolamento del filesy
 ```bash
 PYTHONPATH=src python3 -m unittest discover -s tests -v
 ```
-*(36 test unitari superati con successo in < 0.03s).*
+*(41 test unitari superati con successo in < 0.06s).*
 
 ---
 

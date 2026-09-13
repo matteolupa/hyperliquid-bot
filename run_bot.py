@@ -169,6 +169,18 @@ def parse_args():
         default=True,
         help="Enable Spot vs Perp Basis Trade Monitor (default: True)",
     )
+    parser.add_argument(
+        "--dynamic-sizing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable Dynamic Yield-Weighted Sizing (allocate more capital to top APY assets) (default: True)",
+    )
+    parser.add_argument(
+        "--hourly-alerts",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Send hourly push notifications on Telegram when funding is credited (default: True)",
+    )
 
     return parser.parse_args()
 
@@ -237,6 +249,8 @@ def main():
                 enable_trend_detection=args.enable_trend_detection,
                 enable_cross_exchange=args.enable_cross_exchange,
                 enable_basis_monitor=args.enable_basis_monitor,
+                dynamic_sizing=args.dynamic_sizing,
+                enable_hourly_alerts=args.hourly_alerts,
             )
         elif args.strategy == "market_maker":
             interval = args.interval if args.interval is not None else 10.0

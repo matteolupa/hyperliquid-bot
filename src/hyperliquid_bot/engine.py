@@ -87,6 +87,7 @@ class BotEngine:
             self.telegram.register_command("/balance", self._cmd_balance)
             self.telegram.register_command("/history", self._cmd_history)
             self.telegram.register_command("/watchlist", self._cmd_watchlist)
+            self.telegram.register_command("/stats", self._cmd_stats)
             self.telegram.register_command("/funding", self._cmd_funding)
             self.telegram.register_command("/spread", self._cmd_spread)
             self.telegram.register_command("/basis", self._cmd_basis)
@@ -226,6 +227,12 @@ class BotEngine:
         if hasattr(self.strategy, "get_watchlist_report"):
             return self.strategy.get_watchlist_report()
         return "ℹ️ Nessuna watchlist disponibile per questa strategia."
+
+    def _cmd_stats(self) -> str:
+        """Handle /stats command from Telegram."""
+        if hasattr(self.strategy, "get_stats_report"):
+            return self.strategy.get_stats_report()
+        return "ℹ️ Report statistiche non disponibile per questa strategia."
 
     def _cmd_funding(self) -> str:
         """Handle /funding command from Telegram."""

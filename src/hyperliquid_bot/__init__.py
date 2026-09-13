@@ -24,6 +24,7 @@ from .telegram import TelegramNotifier
 from .funding_analytics import FundingAnalytics, FundingTrend
 from .multi_exchange import MultiExchangeMonitor, ExchangeSpread
 from .basis_monitor import BasisMonitor, BasisData
+from .performance import PerformanceTracker
 
 __all__ = [
     "HyperliquidClient",
@@ -51,6 +52,7 @@ __all__ = [
     "ExchangeSpread",
     "BasisMonitor",
     "BasisData",
+    "PerformanceTracker",
 ]
 
 __version__ = "0.1.0"

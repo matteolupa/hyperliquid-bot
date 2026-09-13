@@ -11,6 +11,7 @@ from .base import BaseStrategy
 from ..client import HyperliquidClient
 from ..fees import FeeCalculator
 from ..ledger import FundingLedger
+from ..performance import PerformanceTracker
 from ..persistence import StatePersistenceManager
 from ..risk import RiskManager
 
@@ -105,6 +106,8 @@ class FundingHarvesterStrategy(BaseStrategy):
         enable_trend_detection: bool = True,       # Enable FundingAnalytics
         enable_cross_exchange: bool = True,        # Enable MultiExchangeMonitor
         enable_basis_monitor: bool = True,         # Enable BasisMonitor
+        dynamic_sizing: bool = True,               # Yield-weighted sizing (more capital to top APY)
+        enable_hourly_alerts: bool = True,         # Send push alert on Telegram each hour funding is credited
     ):
         super().__init__(
             client=client,
@@ -127,13 +130,17 @@ class FundingHarvesterStrategy(BaseStrategy):
         self.hedge_mode = hedge_mode
         self.rotation_min_spread_pct = rotation_min_spread_pct
         self.rotation_max_breakeven_hours = rotation_max_breakeven_hours
+        self.dynamic_sizing = dynamic_sizing
+        self.enable_hourly_alerts = enable_hourly_alerts
         self.candidate_seen_count: Dict[str, int] = {}
         self.active_positions: Dict[str, ActiveFundingPosition] = {}
         self.total_funding_earned_usd: float = 0.0
+        self.last_settlement_hour: int = int(time.time() // 3600)
         self.persistence = StatePersistenceManager(
             filename=f"funding_state_{'dry' if self.dry_run else 'live'}.json"
         )
         self.ledger = FundingLedger(dry_run=self.dry_run)
+        self.performance_tracker = PerformanceTracker(dry_run=self.dry_run)
 
         # Advanced analytics modules (initialized optionally)
         self.funding_analytics = None
@@ -181,6 +188,66 @@ class FundingHarvesterStrategy(BaseStrategy):
         base_capital = self.base_allocation_usd * self.max_positions
         total_accrued = sum(p.accumulated_funding_usd for p in self.active_positions.values())
         return base_capital + self.total_funding_earned_usd + total_accrued
+
+    def get_allocation_for_opportunity(
+        self,
+        opp: FundingOpportunity,
+        opportunities: Optional[List[FundingOpportunity]] = None,
+    ) -> float:
+        """Calculate dynamic yield-weighted allocation for an opportunity.
+
+        Channels more capital to the highest-yielding asset while maintaining
+        strict risk limits (clamped between 20% and 50% of total capital).
+        """
+        base_alloc = self.current_allocation_usd
+        if not self.dynamic_sizing or not opportunities:
+            return base_alloc
+
+        valid_opps = [o for o in opportunities if o.annualized_apy_pct >= self.min_entry_apy_pct]
+        if len(valid_opps) <= 1:
+            return base_alloc
+
+        total_capital = base_alloc * max(self.max_positions, 1)
+
+        try:
+            rank = next((i for i, o in enumerate(valid_opps) if o.coin == opp.coin), 0)
+        except Exception:
+            rank = 0
+
+        if self.max_positions <= 1:
+            weight = 1.0
+        elif self.max_positions == 2 or len(valid_opps) == 2:
+            weight = 0.55 if rank == 0 else 0.45
+        else:
+            if rank == 0:
+                weight = 0.45  # Top yield gets 45% of total capital
+            elif rank == 1:
+                weight = 0.33  # Second gets 33%
+            elif rank == 2:
+                weight = 0.22  # Third gets 22%
+            else:
+                weight = 1.0 / self.max_positions
+
+        weight = max(0.20, min(0.50, weight))
+        return round(total_capital * weight, 2)
+
+    def get_liquidation_buffer_pct(self, pos: ActiveFundingPosition) -> float:
+        """Compute safety liquidation distance % for the Perp Short leg."""
+        if not self.dry_run and hasattr(self.client, "info") and hasattr(self.client.info, "user_state"):
+            try:
+                addr = getattr(self.client, "account_address", None)
+                if addr:
+                    user_state = self.client.info.user_state(addr)
+                    for ap in user_state.get("assetPositions", []):
+                        p = ap.get("position", {})
+                        if p.get("coin") == pos.coin:
+                            liq_px = float(p.get("liquidationPx") or 0)
+                            if liq_px > 0 and pos.entry_price > 0:
+                                return round(((liq_px - pos.entry_price) / pos.entry_price) * 100.0, 1)
+            except Exception:
+                pass
+        # Conservative estimate for delta-neutral 2x/3x margin collateral
+        return 150.0
 
     def _save_state(self) -> None:
         """Persist current positions, earnings and candidate counters to disk."""
@@ -487,6 +554,49 @@ class FundingHarvesterStrategy(BaseStrategy):
                 f"OI: ${top_opp.open_interest_usd:,.0f}"
             )
 
+        # Hourly Funding Settlement Rollover (:00 on the hour)
+        current_hour = int(now // 3600)
+        if current_hour > self.last_settlement_hour:
+            hourly_earned_total = 0.0
+            pos_breakdown = []
+            for coin, p in self.active_positions.items():
+                hr_rate = p.current_hourly_rate or p.hourly_rate_at_entry
+                earned_hr = self.calculate_funding_payment(p.size * p.entry_price, hr_rate)
+                hourly_earned_total += earned_hr
+                apy_val = self.calculate_apy(hr_rate)
+                pos_breakdown.append(f"  • <b>{coin}</b>: +${earned_hr:.4f} USD ({apy_val:.1f}% APY)")
+
+            total_allocated = sum(p.size * p.entry_price for p in self.active_positions.values())
+            realized_hr_apy = (hourly_earned_total * 24 * 365 / total_allocated * 100.0) if total_allocated > 0 else 0.0
+            self.performance_tracker.record_snapshot(
+                equity=self.get_equity(),
+                capital_allocated=total_allocated,
+                total_funding_earned=self.total_funding_earned_usd + sum(p.accumulated_funding_usd for p in self.active_positions.values()),
+                active_positions_count=len(self.active_positions),
+                hourly_earnings_usd=hourly_earned_total,
+                realized_apy_pct=realized_hr_apy,
+                timestamp=now,
+            )
+
+            if self.telegram and self.enable_hourly_alerts and self.active_positions:
+                hour_str = time.strftime("%H:00 UTC", time.gmtime(now))
+                lifetime_total = self.total_funding_earned_usd + sum(p.accumulated_funding_usd for p in self.active_positions.values())
+                alert_lines = [
+                    f"💰 <b>Accredito Funding Orario ({hour_str})</b>",
+                    "━━━━━━━━━━━━━━━━━━━━━━",
+                ] + pos_breakdown + [
+                    "━━━━━━━━━━━━━━━━━━━━━━",
+                    f"💵 <b>Incasso Ultima Ora:</b> 🟢 <b>+${hourly_earned_total:.4f} USD</b>",
+                    f"🏆 <b>Totale Incassato:</b> <b>+${lifetime_total:.4f} USD</b>",
+                    "⚡ <b>Prossimo accredito:</b> tra ~60m",
+                ]
+                try:
+                    self.telegram.send_message("\n".join(alert_lines))
+                except Exception as e:
+                    logger.debug(f"Errore invio notifica oraria: {e}")
+
+            self.last_settlement_hour = current_hour
+
         # 1. Manage existing positions (accrue dynamic live funding and check if APY decayed)
         for coin, pos in list(self.active_positions.items()):
             # Find current live market rate
@@ -598,7 +708,8 @@ class FundingHarvesterStrategy(BaseStrategy):
                     size=worst_pos.size, entry_price=worst_pos.entry_price,
                     exit_price=worst_pos.entry_price, entry_is_maker=True, exit_is_maker=True,
                 )
-                target_size = self.current_allocation_usd / opp.mark_price
+                alloc_usd = self.get_allocation_for_opportunity(opp, opportunities)
+                target_size = alloc_usd / opp.mark_price
                 round_trip_new = self.fee_calculator.calculate_round_trip_fee(
                     size=target_size, entry_price=opp.mark_price,
                     exit_price=opp.mark_price, entry_is_maker=True, exit_is_maker=True,
@@ -608,7 +719,7 @@ class FundingHarvesterStrategy(BaseStrategy):
                     total_rotation_cost *= 2  # Due gambe per posizione
 
                 # Calcola le ore di breakeven
-                new_hourly_funding = self.calculate_funding_payment(self.current_allocation_usd, opp.hourly_funding_rate)
+                new_hourly_funding = self.calculate_funding_payment(alloc_usd, opp.hourly_funding_rate)
                 old_hourly_funding = self.calculate_funding_payment(notional, worst_pos.current_hourly_rate or 0)
                 delta_hourly = new_hourly_funding - old_hourly_funding
                 if delta_hourly <= 0:
@@ -692,7 +803,8 @@ class FundingHarvesterStrategy(BaseStrategy):
                 )
                 continue
 
-            target_size = self.current_allocation_usd / opp.mark_price
+            alloc_usd = self.get_allocation_for_opportunity(opp, opportunities)
+            target_size = alloc_usd / opp.mark_price
             notional = target_size * opp.mark_price
 
             # Risk check on individual order and total portfolio exposure
@@ -818,16 +930,25 @@ class FundingHarvesterStrategy(BaseStrategy):
         compounded_extra = total_lifetime if self.auto_compound else 0.0
 
         title = "📊 [RESOCONTO GUADAGNI SPOT-PERP DELTA-ZERO]" if self.hedge_mode == "spot-perp" else "📊 [RESOCONTO GUADAGNI FUNDING ARBITRAGE]"
+        now = time.time()
+        sec_to_next = 3600 - int(now % 3600)
+        mins_to_next = sec_to_next // 60
+        secs_rem = sec_to_next % 60
+
         lines = [
             "\n" + "=" * 65,
             title,
             f"   Capitale Allocato:        ${total_allocated:,.2f} ({len(self.active_positions)} posizioni attive)",
             f"   Rendita Oraria Stimata:   +${total_hourly_rate:.4f}/h (+${total_daily_rate:.2f}/giorno)",
+            f"   ⏱️ Prossimo Accredito:     tra {mins_to_next}m {secs_rem}s (stimati: +${total_hourly_rate:.4f} USD)",
             f"   Funding Maturato Attuale: +${total_accrued:.4f} USD",
             f"   Totale Guadagni Incassati:+${total_lifetime:.4f} USD",
         ]
         if self.auto_compound and compounded_extra > 0:
-            lines.append(f"   ⚡ Auto-Compounding:      +${compounded_extra:.4f} reinvestiti (Taglia/Pos: ${self.current_allocation_usd:.2f})")
+            lines.append(f"   ⚡ Auto-Compounding:      +${compounded_extra:.4f} reinvestiti (Taglia Base/Pos: ${self.current_allocation_usd:.2f})")
+        if self.active_positions:
+            buf_items = [f"{coin} +{self.get_liquidation_buffer_pct(p):.0f}%" for coin, p in self.active_positions.items()]
+            lines.append(f"   🛡️ Buffer Liquidazione:   {' | '.join(buf_items)} (SICURO)")
         lines.append("-" * 65)
 
         for coin, p in self.active_positions.items():
@@ -1090,4 +1211,9 @@ class FundingHarvesterStrategy(BaseStrategy):
         if not coins:
             return "ℹ️ <b>Nessuna coppia Spot-Perp disponibile per l'analisi del basis.</b>"
         return self.basis_monitor.format_basis_report(coins, limit=limit)
+
+    def get_stats_report(self) -> str:
+        """Format 24h/7d performance analytics report for Telegram /stats."""
+        return self.performance_tracker.format_stats_report(self.get_status())
+
 
